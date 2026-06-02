@@ -1233,7 +1233,7 @@ export function scanAll(force = false): ApiPayload {
   repos.sort((a, b) => b.sessionCount - a.sessionCount)
 
   // default repo: prefer 'EditReward' if present (per requirements doc), else top of list
-  const preferred = repos.find((r) => r.name === 'EditReward')
+  const preferred = repos[0] // default to highest session count
   const defaultRepoId = preferred?.id || repos[0]?.id || ''
 
   const payload: ApiPayload = {

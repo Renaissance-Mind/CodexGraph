@@ -6,3 +6,7 @@ dist-ssr
 *.local
 .DS_Store
 .vite
+PROGRESS.md
+PLAN.md
+sessiontree-requirements.md
+sessiontree-light-ui.png
