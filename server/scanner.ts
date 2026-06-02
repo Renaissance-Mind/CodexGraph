@@ -831,42 +831,53 @@ function buildBundle(
       const end = new Date(s.endTs).getTime()
       const durationMin = Math.max(0, Math.round((end - start) / 60000))
 
-      // Attach to the commit(s) this session was actively working on:
-      //   1. Primary: commits created DURING the session (startTs..endTs) on the
-      //      same worktree's branch — these are the commits Codex produced.
-      //   2. Fallback: the most recent commit ≤ session start time on ANY branch
-      //      reachable from this worktree (in case branch assignment is imprecise).
-      //   3. Last resort: the worktree's current HEAD.
-      // We pick the LATEST of the during-session commits as the single attachCommitId
-      // (the API field is singular). A future improvement could make it an array.
+      // Attach to the commit this session was actively working on.
+      //
+      // Strategy (ordered by priority):
+      //   1. Commits created DURING the session (startTs..endTs) on the same
+      //      branch — these are the commits Codex produced in this conversation.
+      //   2. If this is the LATEST session on its worktree AND the worktree HEAD
+      //      is newer than the session endTs, extend the window to include commits
+      //      up to HEAD. Codex sessions sometimes stop writing events while the
+      //      agent keeps committing, so endTs can be stale.
+      //   3. Fallback: most recent commit ≤ session start time on the same branch.
+      //   4. Last resort: worktree HEAD.
+      //   5. Ultra-fallback: any commit ≤ startTs.
       const branchId = wt.branchId
+      const isLatestOnWorktree = idx === list.length - 1
       let attach: Commit | undefined
-      // 1. commits during session
+
       if (branchId) {
+        // effective end: for the latest session, extend to worktree HEAD's date
+        let effectiveEnd = s.endTs
+        if (isLatestOnWorktree) {
+          const headCommit = commits.find((c) => c.id === wt.head.commitId)
+          if (headCommit && headCommit.date > effectiveEnd) effectiveEnd = headCommit.date
+        }
+        // 1+2. commits during [startTs, effectiveEnd]
         const during = commits.filter(
-          (c) => c.branchId === branchId && c.date >= s.startTs && c.date <= s.endTs,
+          (c) => c.branchId === branchId && c.date >= s.startTs && c.date <= effectiveEnd,
         )
         if (during.length > 0) {
           during.sort((a, b) => (a.date > b.date ? -1 : 1))
           attach = during[0]
         }
       }
-      // 2. fallback: most recent commit ≤ session start (any branch from this worktree)
-      if (!attach) {
-        const before = commits.filter((c) => {
-          if (branchId && c.branchId === branchId) return c.date <= s.startTs
-          return false
-        })
+      // 3. fallback: most recent commit ≤ session start
+      if (!attach && branchId) {
+        const before = commits.filter(
+          (c) => c.branchId === branchId && c.date <= s.startTs,
+        )
         if (before.length > 0) {
           before.sort((a, b) => (a.date > b.date ? -1 : 1))
           attach = before[0]
         }
       }
-      // 3. last resort: worktree HEAD
+      // 4. last resort: worktree HEAD
       if (!attach) {
         attach = commits.find((c) => c.id === wt.head.commitId)
       }
-      // 4. ultra-fallback: any commit ≤ startTs across all branches
+      // 5. ultra-fallback: any commit ≤ startTs across all branches
       if (!attach) {
         const any = commits.filter((c) => c.date <= s.startTs)
         if (any.length > 0) {
