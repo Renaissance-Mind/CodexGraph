@@ -831,23 +831,48 @@ function buildBundle(
       const end = new Date(s.endTs).getTime()
       const durationMin = Math.max(0, Math.round((end - start) / 60000))
 
-      // attach to commit on the worktree's branch closest in time (≤ s.startTs)
+      // Attach to the commit(s) this session was actively working on:
+      //   1. Primary: commits created DURING the session (startTs..endTs) on the
+      //      same worktree's branch — these are the commits Codex produced.
+      //   2. Fallback: the most recent commit ≤ session start time on ANY branch
+      //      reachable from this worktree (in case branch assignment is imprecise).
+      //   3. Last resort: the worktree's current HEAD.
+      // We pick the LATEST of the during-session commits as the single attachCommitId
+      // (the API field is singular). A future improvement could make it an array.
       const branchId = wt.branchId
       let attach: Commit | undefined
+      // 1. commits during session
       if (branchId) {
-        const candidates = commits.filter((c) => c.branchId === branchId && c.date <= s.startTs)
-        candidates.sort((a, b) => (a.date > b.date ? -1 : 1))
-        attach = candidates[0]
-        if (!attach) {
-          // fall back to branch head
-          attach = commits.find((c) => c.id === branchHeadByShort.has(c.id) ? false : false)
-          const b = branchesMap.get(branchId)
-          if (b?.headCommitId) attach = commits.find((c) => c.id === b.headCommitId)
+        const during = commits.filter(
+          (c) => c.branchId === branchId && c.date >= s.startTs && c.date <= s.endTs,
+        )
+        if (during.length > 0) {
+          during.sort((a, b) => (a.date > b.date ? -1 : 1))
+          attach = during[0]
         }
       }
+      // 2. fallback: most recent commit ≤ session start (any branch from this worktree)
       if (!attach) {
-        // last resort: worktree HEAD
+        const before = commits.filter((c) => {
+          if (branchId && c.branchId === branchId) return c.date <= s.startTs
+          return false
+        })
+        if (before.length > 0) {
+          before.sort((a, b) => (a.date > b.date ? -1 : 1))
+          attach = before[0]
+        }
+      }
+      // 3. last resort: worktree HEAD
+      if (!attach) {
         attach = commits.find((c) => c.id === wt.head.commitId)
+      }
+      // 4. ultra-fallback: any commit ≤ startTs across all branches
+      if (!attach) {
+        const any = commits.filter((c) => c.date <= s.startTs)
+        if (any.length > 0) {
+          any.sort((a, b) => (a.date > b.date ? -1 : 1))
+          attach = any[0]
+        }
       }
 
       const firstUser = s.firstUserMsg || ''
