@@ -1,10 +1,8 @@
 # 🌐 CodexGraph
 
-> **Local-first, read-only visualization** of your Codex sessions × git worktrees × branch lineage.
+[中文文档](./README_CN.md)
 
-<p align="center">
-  <img src="./sessiontree-light-ui.png" alt="CodexGraph screenshot" width="900" />
-</p>
+> **Local-first, read-only visualization** of your Codex sessions × git worktrees × branch lineage.
 
 ---
 
@@ -27,13 +25,14 @@ CodexGraph scans your **real** `~/.codex/sessions/**/*.jsonl` files and your loc
 ## 🚀 Quick Start
 
 ```bash
-cd ~/workspace/SessionTree   # (or wherever you cloned this)
+git clone https://github.com/caopulan/CodexGraph.git
+cd CodexGraph
 npm install
 npm run dev
 # open http://localhost:17001
 ```
 
-> ⏳ First scan takes ~14s (335+ sessions, 19 repos). Subsequent loads are instant (30-min memory cache + disk-persisted incremental file cache).
+> ⏳ First scan takes ~14s. Subsequent loads are instant (30-min memory cache + disk-persisted incremental file cache).
 
 ---
 
@@ -42,18 +41,20 @@ npm run dev
 | Feature | Description |
 |---------|-------------|
 | 🗂️ **Multi-repo** | Auto-discovers all repos from your Codex session `cwd`s |
-| 🌳 **Git DAG** | Horizontal main branch + fork/merge curves, commit dots, HEAD labels |
+| 🌳 **Git DAG** | Horizontal main branch + fork/merge curves, commit dots, branch labels |
 | 🃏 **Session cards** | Multi-line cards above the lane: status dot · label · branch pill · hash · date · title · prompt snippet · last user message |
-| 📊 **Commit cards** | Below the lane: hash · author · date · commit message (cool-grey background to distinguish from session cards) |
+| 📊 **Commit cards** | Below the lane: hash · author · date · commit message (cool-grey background) |
 | 📌 **Pinned filter** | Toggle to show only Codex-pinned sessions |
 | 👤 **Author filter** | Filter commits/sessions by git author |
 | ⚙️ **Settings** | Activity threshold (1h–30d), automation indicators, pulse animation |
 | 🔎 **Zoom + Pan** | Cmd/Ctrl+scroll to zoom time axis; drag to pan; Fit button resets to 100% |
 | 📅 **Day gridlines** | Vertical dashed lines aligned with the top date axis, adaptive spacing |
 | 🏷️ **Session rename** | Reads Codex app renames (`session_index.jsonl`) + CLI `thread_name_updated` events |
-| ⚡ **Automation detection** | Parses `automations/*.toml` + replays in-session `automation_update` create/update/delete events |
+| ⚡ **Automation detection** | Parses `automations/*.toml` + replays in-session `automation_update` events |
 | 🟢 **Status colors** | inactive (grey) · active (blue) · automated (purple) · running (green pulse) |
-| 🗃️ **Incremental scan** | Per-file mtime+size cache, git toplevel cache, large-file head+tail sampling (handles 1GB+ session files without OOM) |
+| 🗃️ **Incremental scan** | Per-file mtime+size cache, git toplevel cache, large-file head+tail sampling |
+| 🔍 **Commit diff viewer** | Click a commit to see changed files + expandable unified diffs inline |
+| 🆚 **Commit compare** | Cmd/Ctrl-click two commits for side-by-side `git diff` with per-file bar charts |
 
 ---
 
@@ -73,10 +74,8 @@ npm run dev
 │   │   └── app.css          # App grid + settings popover
 │   └── components/
 │       ├── TopBar.tsx/css    # Header: repo selector, search, date range, read-only badge
-│       └── GraphCanvas.tsx/css  # The entire canvas: SVG graph, session/commit cards,
-│                                 # live panel, pinned card, diff viewer, legend
-├── PLAN.md                  # Implementation plan
-├── PROGRESS.md              # Detailed changelog (v1–v12+)
+│       └── GraphCanvas.tsx/css  # Canvas: SVG graph, session/commit cards, live panel,
+│                                 # pinned card, diff viewer, legend
 ├── package.json
 ├── vite.config.ts
 └── tsconfig.json
