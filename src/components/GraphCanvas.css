@@ -342,7 +342,7 @@
   pointer-events: auto;
 }
 
-/* lane label box */
+/* lane label box — auto width, no clipping (let long branch names show in full) */
 .lane-label {
   display: inline-flex;
   align-items: center;
@@ -356,10 +356,12 @@
   color: var(--text-primary);
   font-weight: 500;
   white-space: nowrap;
+  box-sizing: border-box;
+  max-width: 360px;
+}
+.lane-label__name {
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 100%;
-  box-sizing: border-box;
 }
 
 .lane-label--main {
@@ -391,7 +393,8 @@
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
-  flex: 1;
+  flex: 0 1 auto;
+  max-width: 240px;
 }
 
 .lane-label__badge {
@@ -435,12 +438,17 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  height: 14px;
-  padding: 0 5px;
-  font-size: 9.5px;
+  height: 16px;
+  padding: 0 6px;
+  font-size: 10px;
+  font-family: var(--font-mono);
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
   color: var(--accent-strong);
   background: var(--accent-soft);
   border-radius: 3px;
@@ -461,8 +469,8 @@
   display: flex;
   flex-direction: column;
   gap: 3px;
-  height: 56px;
-  padding: 7px 9px;
+  height: 88px;
+  padding: 8px 10px;
   font-family: var(--font-sans);
   font-size: 11.5px;
   color: var(--text-primary);
@@ -470,7 +478,7 @@
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   box-sizing: border-box;
-  width: 320px;
+  width: 100%;
   font-weight: 500;
   user-select: none;
   cursor: pointer;
@@ -588,6 +596,30 @@
   word-break: break-word;
   white-space: normal;
 }
+
+.session-chip__last {
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+  white-space: normal;
+  margin-top: auto;
+  border-top: 1px dashed var(--border-subtle);
+  padding-top: 4px;
+}
+
+.session-chip__last-icon {
+  color: var(--text-tertiary);
+  margin-right: 4px;
+}
+
+.session-chip--active .session-chip__last { color: rgba(255, 255, 255, 0.85); }
+.session-chip--active .session-chip__last-icon { color: rgba(255, 255, 255, 0.7); }
+.session-chip--active .session-chip__last { border-top-color: rgba(255, 255, 255, 0.25); }
 
 .session-chip--active .session-chip__title { color: #ffffff; }
 
@@ -1777,3 +1809,481 @@
 @keyframes dash-move {
   to { stroke-dashoffset: -18; }
 }
+
+/* focused (from Live panel) — strong highlight ring + brief attention pulse */
+.session-chip--focused {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.35), var(--shadow-pop) !important;
+  animation: focus-pop 0.5s ease;
+}
+@keyframes focus-pop {
+  0% { transform: scale(1.06); }
+  100% { transform: scale(1); }
+}
+.live-row--focused {
+  background: var(--accent-soft) !important;
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.18);
+}
+
+/* compact chip variant — one line: dot + label + title + day */
+.canvas__chip-group--compact .session-chip {
+  height: 24px;
+  padding: 0 8px;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+.canvas__chip-group--compact .session-chip__row1 { display: contents; }
+.canvas__chip-group--compact .session-chip__title {
+  -webkit-line-clamp: 1;
+  flex: 1;
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+.canvas__chip-group--compact .session-chip__last { display: none; }
+.canvas__chip-group--compact .session-chip__hash { font-size: 9px; }
+.canvas__chip-group--compact .session-chip__day { font-size: 9.5px; }
+
+/* +N overflow pill — small, sits above its commit's card stack */
+.canvas__chip-group--overflow .session-chip--overflow,
+.session-chip--overflow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 22px;
+  padding: 0 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--bg-soft);
+  border: 1px dashed var(--border-strong);
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  box-shadow: var(--shadow-card);
+}
+.session-chip--overflow:hover {
+  background: var(--accent-softer);
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+/* empty-lane demotion: thinner line, faded label */
+.lane-label--empty {
+  opacity: 0.55;
+  font-size: 10.5px;
+  height: 20px;
+  padding: 0 6px;
+}
+
+/* "Now" hint pill in header */
+.canvas__now {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  background: linear-gradient(180deg, #ecfdf5 0%, #d1fae5 100%);
+  border: 1px solid #6ee7b7;
+  color: #065f46;
+  cursor: pointer;
+}
+.canvas__now-pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--status-clean);
+  animation: pulse-dot 1.6s ease-in-out infinite;
+}
+.canvas__now b { font-weight: 600; }
+
+/* compact toggle in header */
+.canvas__density {
+  display: inline-flex;
+  background: var(--bg-soft);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 2px;
+}
+.canvas__density button {
+  padding: 4px 9px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  border-radius: 4px;
+  background: transparent;
+}
+.canvas__density button.active {
+  background: var(--bg-surface);
+  color: var(--accent-strong);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+}
+
+/* branch name pill on each card (so user always knows which branch a session is on) */
+.session-chip__branch {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  color: #4338ca;
+  background: #eef2ff;
+  border: 1px solid #c7d2fe;
+  border-radius: 3px;
+  padding: 0 5px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+}
+.session-chip--active .session-chip__branch {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.35);
+}
+
+/* "what was this session about" line — only shows when title is a user rename
+   so the card explains BOTH the renamed label AND what was actually done */
+.session-chip__what {
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+  white-space: normal;
+  margin-top: 2px;
+}
+.session-chip__what-icon {
+  color: var(--text-tertiary);
+  margin-right: 4px;
+}
+.session-chip--active .session-chip__what { color: rgba(255, 255, 255, 0.85); }
+.session-chip--active .session-chip__what-icon { color: rgba(255, 255, 255, 0.7); }
+
+/* commit card — below the lane line, tinted DIFFERENTLY from session cards
+   so the eye can immediately tell session (warm-neutral white) vs commit
+   (cool grey) apart even at a glance. */
+.canvas__commit-card .commit-card {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 9px;
+  background: linear-gradient(180deg, #f1f5f9 0%, #e7eef7 100%);
+  border: 1px solid #cbd5e1;
+  border-radius: var(--radius-md);
+  box-sizing: border-box;
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+  transition: background 80ms ease, border-color 80ms ease;
+}
+.canvas__commit-card.canvas__commit-card--cmp-a .commit-card {
+  background: linear-gradient(180deg, #fef3c7 0%, #fde68a 100%);
+  border-color: #f59e0b;
+}
+.canvas__commit-card.canvas__commit-card--cmp-b .commit-card {
+  background: linear-gradient(180deg, #d1fae5 0%, #a7f3d0 100%);
+  border-color: #10b981;
+}
+.canvas__commit-card:hover .commit-card {
+  background: var(--accent-softer);
+  border-color: var(--accent-soft);
+}
+.canvas__commit-card--active .commit-card {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.18), var(--shadow-card);
+}
+.canvas__commit-card--dim { opacity: 0.4; }
+.canvas__commit-card--dim:hover { opacity: 0.95; }
+
+.commit-card__row1 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+.commit-card__hash {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-radius: 3px;
+  padding: 0 5px;
+}
+.commit-card__tag {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 0 5px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 3px;
+}
+.commit-card__tag--head { color: var(--accent-strong); background: var(--accent-soft); }
+.commit-card__tag--merge { color: #166534; background: var(--status-clean-bg); }
+.commit-card__author {
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.commit-card__date {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+.commit-card__msg {
+  font-size: 11.5px;
+  color: var(--text-primary);
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+/* "Pinned only" toggle in header */
+.canvas__pin-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--bg-soft);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+.canvas__pin-filter:hover { border-color: var(--border-strong); color: var(--text-primary); }
+.canvas__pin-filter--active {
+  background: #fef3c7;
+  border-color: #fbbf24;
+  color: #92400e;
+  font-weight: 600;
+}
+.canvas__pin-filter-icon { font-size: 12px; }
+.canvas__pin-filter-count {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  color: #92400e;
+  background: #fde68a;
+  border-radius: 999px;
+  padding: 1px 7px;
+  min-width: 18px;
+  text-align: center;
+}
+.canvas__pin-filter--active .canvas__pin-filter-count {
+  background: #fbbf24;
+  color: #fff;
+}
+
+/* Pin badge on chip + live row */
+.session-chip__pin {
+  flex-shrink: 0;
+  font-size: 10px;
+}
+.live-row__pin {
+  font-size: 11px;
+  margin-right: 1px;
+}
+
+/* Diff panel — Cmd-click compare result */
+.diff-panel {
+  position: absolute;
+  left: 16px;
+  bottom: 16px;
+  width: 520px;
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-pop);
+  z-index: 30;
+  overflow: hidden;
+}
+.diff-panel__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: linear-gradient(180deg, #fff7ed 0%, #f0fdf4 100%);
+}
+.diff-panel__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.diff-panel__chip {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 3px;
+}
+.diff-panel__chip--a { color: #92400e; background: #fde68a; border: 1px solid #f59e0b; }
+.diff-panel__chip--b { color: #065f46; background: #a7f3d0; border: 1px solid #10b981; }
+.diff-panel__arrow { color: var(--text-secondary); font-size: 14px; }
+.diff-panel__close {
+  width: 24px; height: 24px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--text-tertiary); border-radius: 4px; font-size: 16px;
+}
+.diff-panel__close:hover { background: var(--bg-soft); color: var(--text-primary); }
+.diff-panel__summary {
+  padding: 8px 12px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-subtle);
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+}
+.diff-panel__body {
+  overflow-y: auto;
+  padding: 4px;
+}
+.diff-panel__empty {
+  padding: 16px;
+  color: var(--text-tertiary);
+  text-align: center;
+  font-size: 12px;
+}
+.diff-panel__more {
+  padding: 8px 12px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  text-align: center;
+}
+.diff-panel__hint {
+  padding: 6px 12px;
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  border-top: 1px solid var(--border-subtle);
+  font-style: italic;
+}
+.diff-row {
+  display: grid;
+  grid-template-columns: 1fr 44px 44px 90px;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 8px;
+  font-size: 11.5px;
+  border-radius: 4px;
+}
+.diff-row:hover { background: var(--bg-soft); }
+.diff-row__path {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.diff-row__num { font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; text-align: right; }
+.diff-row__num--add { color: #16a34a; }
+.diff-row__num--del { color: #dc2626; }
+.diff-row__bar {
+  display: flex;
+  height: 8px;
+  background: var(--bg-subtle);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.diff-row__bar-add { background: #16a34a; }
+.diff-row__bar-del { background: #dc2626; }
+
+.diff-hint {
+  position: absolute;
+  bottom: 16px;
+  left: 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-surface);
+  border: 1px solid #fbbf24;
+  border-radius: var(--radius-md);
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-primary);
+  z-index: 30;
+  box-shadow: var(--shadow-card);
+}
+.diff-hint button { color: var(--text-tertiary); padding: 0 4px; }
+
+/* Pinned-but-inactive sessions in the Live panel — muted but legible */
+.live-row--inactive {
+  border-left: 3px solid #f59e0b;
+  background: #fffbeb;
+}
+.live-row--inactive .live-row__title { color: var(--text-secondary); }
+.live-row__dot--inactive { background: #fbbf24; }
+
+/* Dot styling for commits that have visible cards (session or commit card) —
+   makes "which dot belongs to which card" obvious at a glance. */
+.canvas__dot--has-card {
+  fill: #fef3c7;
+  stroke: #f59e0b;
+  stroke-width: 2.2;
+}
+.canvas__dot--has-session-card {
+  fill: var(--accent-soft);
+  stroke: var(--accent);
+  stroke-width: 2.5;
+}
+
+/* file diff list + inline unified diff viewer */
+.file-diff__loading, .file-diff__empty { padding: 12px; color: var(--text-tertiary); font-size: 12px; text-align: center; }
+.file-diff__list { display: flex; flex-direction: column; max-height: 300px; overflow-y: auto; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg-soft); }
+.file-diff__item { border-bottom: 1px solid var(--border-subtle); }
+.file-diff__item:last-child { border-bottom: none; }
+.file-diff__row { display: grid; grid-template-columns: 16px 1fr 44px 44px 80px; gap: 6px; align-items: center; padding: 6px 10px; font-size: 11.5px; width: 100%; text-align: left; cursor: pointer; }
+.file-diff__row:hover { background: var(--bg-surface); }
+.file-diff__caret { color: var(--text-tertiary); font-size: 10px; }
+.file-diff__path { font-family: var(--font-mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-diff__num { font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; text-align: right; }
+.file-diff__num--add { color: #16a34a; }
+.file-diff__num--del { color: #dc2626; }
+.file-diff__bar { display: flex; height: 8px; background: var(--bg-subtle); border-radius: 2px; overflow: hidden; }
+.file-diff__bar-add { background: #16a34a; }
+.file-diff__bar-del { background: #dc2626; }
+.file-diff__diff { max-height: 400px; overflow: auto; border-top: 1px solid var(--border-subtle); background: #1e293b; padding: 8px 0; }
+.file-diff__pre { margin: 0; font-family: var(--font-mono); font-size: 11.5px; line-height: 1.5; white-space: pre; tab-size: 4; }
+.file-diff__more { padding: 8px 12px; font-size: 11px; color: var(--text-tertiary); text-align: center; }
+
+.diff-line { padding: 0 12px; min-height: 18px; color: #cbd5e1; }
+.diff-line--add { background: rgba(22, 163, 74, 0.18); color: #86efac; }
+.diff-line--del { background: rgba(220, 38, 38, 0.18); color: #fca5a5; }
+.diff-line--hunk { color: #60a5fa; font-weight: 600; }
+.diff-line--file { color: #f8fafc; font-weight: 600; }
+.diff-line--meta { color: #64748b; }
+.diff-empty { color: #64748b; font-style: italic; }
+
+.pinned-card__section-meta { font-weight: 400; color: var(--text-tertiary); font-size: 10px; margin-left: 8px; }

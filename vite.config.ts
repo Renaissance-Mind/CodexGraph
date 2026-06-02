@@ -5,7 +5,8 @@ import { sessionTreeApi } from './server/vite-plugin'
 export default defineConfig({
   plugins: [react(), sessionTreeApi()],
   server: {
-    port: 5173,
+    port: 17001,
     host: true,
+    strictPort: true,
   },
 })

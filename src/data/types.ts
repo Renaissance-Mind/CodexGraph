@@ -98,8 +98,10 @@ export interface CodexSession {
   titleRenamed: boolean
   /** where the rename came from: 'app' (session_index.jsonl) | 'cli' (thread_name_updated event) | undefined */
   renameSource?: 'app' | 'cli'
-  promptSnippet: string     // longer truncation
+  promptSnippet: string     // longer truncation of the first user msg
   prompt: string            // full first user msg (truncated to a few KB)
+  lastUserSnippet: string   // short snippet of the LAST user message (empty if same as first)
+  lastUserPrompt: string    // longer last user message (truncated)
   model: string
   cliVersion?: string
   originator?: string
@@ -107,6 +109,8 @@ export interface CodexSession {
   messageCount: number
   /** Codex automation attached to this session, if any */
   automation?: SessionAutomation
+  /** True when this session id is in ~/.codex/.codex-global-state.json's pinned-thread-ids */
+  pinned: boolean
 }
 
 export interface DaySessionBucket {

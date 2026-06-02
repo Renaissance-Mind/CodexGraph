@@ -41,13 +41,16 @@ const AXIS_HEIGHT = 32
 const COMMIT_RADIUS = 4
 const HEAD_OFFSET = 16
 
-const CARD_W = 300            // session card width (screen px, constant)
-const CARD_H = 50             // session card height (screen px, 2 lines)
-const CARD_GAP_X = 10         // min horizontal gap between cards in a row
-const CARD_GAP_Y = 8          // vertical gap between card rows
-const LANE_LINE_PAD = 22      // gap between the lane line and the nearest card row
-const LANE_BASE_PAD = 30      // padding below a lane line before the next lane
-const LANE_MIN_TOP = 26       // min space above a lane line when it has no cards
+const CARD_W_DETAIL = 360
+const CARD_H_DETAIL = 88
+const CARD_GAP_X = 10
+const CARD_GAP_Y_DETAIL = 8
+const LANE_LINE_PAD = 14
+const LANE_BASE_PAD = 22
+const LANE_MIN_TOP = 22
+const MAX_STACK_DETAIL = 3
+const COMMIT_CARD_W = 260
+const COMMIT_CARD_H_DETAIL = 60
 
 const MIN_ZOOM = 0.2
 const MAX_ZOOM = 4
@@ -70,6 +73,11 @@ export function GraphCanvas({
   const [containerSize, setContainerSize] = useState<{ w: number; h: number }>({ w: 1200, h: 700 })
   const [zoom, setZoom] = useState(1)
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
+  const CARD_W = CARD_W_DETAIL
+  const CARD_H = CARD_H_DETAIL
+  const CARD_GAP_Y = CARD_GAP_Y_DETAIL
+  const MAX_STACK = MAX_STACK_DETAIL
+  const COMMIT_H = COMMIT_CARD_H_DETAIL
 
   const now = useMemo(() => Date.now(), [bundle])
   const sessionStateMap = useMemo(() => {
@@ -88,6 +96,41 @@ export function GraphCanvas({
     return [...map.entries()].sort((a, b) => b[1] - a[1])
   }, [bundle.commits])
   const [authorFilter, setAuthorFilter] = useState<string>('all')
+  const [pinnedOnly, setPinnedOnly] = useState(false)
+  const totalPinned = useMemo(() => bundle.sessions.filter((s) => s.pinned).length, [bundle.sessions])
+
+  // Cmd-click two commits to compare (git diff style). [a, b] in click order.
+  const [compareCommits, setCompareCommits] = useState<[string, string] | null>(null)
+  const [compareAnchor, setCompareAnchor] = useState<string | null>(null)
+  interface DiffResult { files: { path: string; added: number; removed: number; status: string }[]; summary: string }
+  const [compareDiff, setCompareDiff] = useState<DiffResult | null>(null)
+  useEffect(() => {
+    if (!compareCommits) { setCompareDiff(null); return }
+    let cancelled = false
+    setCompareDiff(null)
+    fetch(`/api/diff?repo=${encodeURIComponent(bundle.repo.id)}&a=${compareCommits[0]}&b=${compareCommits[1]}`)
+      .then((r) => r.json())
+      .then((d) => { if (!cancelled) setCompareDiff(d) })
+      .catch(() => { if (!cancelled) setCompareDiff({ files: [], summary: 'diff failed' }) })
+    return () => { cancelled = true }
+  }, [compareCommits, bundle.repo.id])
+  function onCommitClick(c: Commit, e: React.MouseEvent) {
+    if (e.metaKey || e.ctrlKey) {
+      // start or finish a compare
+      if (!compareAnchor) {
+        setCompareAnchor(c.id)
+        setCompareCommits(null)
+      } else if (compareAnchor !== c.id) {
+        setCompareCommits([compareAnchor, c.id])
+        setCompareAnchor(null)
+      }
+      return
+    }
+    // plain click → pin + clear compare
+    setCompareCommits(null)
+    setCompareAnchor(null)
+    onPinCommit(c.id)
+  }
 
   // size tracking
   useEffect(() => {
@@ -102,12 +145,18 @@ export function GraphCanvas({
 
   // visible branches (lane filter)
   const visibleBranches: Branch[] = useMemo(() => {
+    // Branches that actually carry at least one session (across the whole repo).
+    // Lanes with zero sessions are noise — hide them by default; the default
+    // branch always stays visible as the trunk reference.
+    const branchesWithSessions = new Set<string>()
+    for (const s of bundle.sessions) if (s.branchId) branchesWithSessions.add(s.branchId)
+    const base = bundle.branches.filter((b) => b.isDefault || branchesWithSessions.has(b.id))
     if (filter === 'worktrees') {
       const branchWithWt = new Set<string>()
       for (const wt of bundle.worktrees) if (wt.branchId) branchWithWt.add(wt.branchId)
-      return bundle.branches.filter((b) => b.isDefault || branchWithWt.has(b.id))
+      return base.filter((b) => b.isDefault || branchWithWt.has(b.id))
     }
-    return bundle.branches
+    return base
   }, [bundle, filter])
 
   const laneByBranch = useMemo(() => {
@@ -128,18 +177,6 @@ export function GraphCanvas({
     [authorFilter],
   )
 
-  // commit world-x = compact column index * dx
-  const xMap = useMemo(() => {
-    const uniqX = Array.from(new Set(allVisibleCommits.map((c) => c.x))).sort((a, b) => a - b)
-    const m = new Map<number, number>()
-    uniqX.forEach((x, i) => m.set(x, i))
-    return m
-  }, [allVisibleCommits])
-  function worldX(c: Commit): number {
-    return PADDING_LEFT + (xMap.get(c.x) || 0) * COMMIT_DX
-  }
-  const contentWorldWidth = PADDING_LEFT + xMap.size * COMMIT_DX + PADDING_RIGHT
-
   const commitByShort = useMemo(() => {
     const m = new Map<string, Commit>()
     for (const c of bundle.commits) m.set(c.id, c)
@@ -149,8 +186,71 @@ export function GraphCanvas({
   // sessions attached to a visible commit
   const visibleCommitIds = useMemo(() => new Set(allVisibleCommits.map((c) => c.id)), [allVisibleCommits])
   const sessions: CodexSession[] = useMemo(
-    () => bundle.sessions.filter((s) => s.attachCommitId && visibleCommitIds.has(s.attachCommitId)),
-    [bundle.sessions, visibleCommitIds],
+    () => bundle.sessions.filter((s) =>
+      s.attachCommitId
+      && visibleCommitIds.has(s.attachCommitId)
+      && (!pinnedOnly || s.pinned)
+    ),
+    [bundle.sessions, visibleCommitIds, pinnedOnly],
+  )
+
+  // ----- variable-width commit columns (world space, pre-zoom) -----
+  // Columns are NOT equal-width. Walking left→right in time order, whenever a
+  // lane carries a session card at a column we reserve ~one card-width of world
+  // space before that lane's NEXT card, so consecutive cards on the same lane
+  // sit side-by-side (row 0) instead of stacking upward. Commits with no cards
+  // keep the compact base spacing. The time axis becomes non-uniform — that's
+  // intentional (cards readability > strict time-linearity).
+  const { colX, contentWorldWidth } = useMemo(() => {
+    const cols = Array.from(new Set(allVisibleCommits.map((c) => c.x))).sort((a, b) => a - b)
+    // lane -> set of commit x-cols that bear either a session card OR a commit card
+    const laneCardCols = new Map<number, Set<number>>()
+    function mark(c: Commit) {
+      const lane = laneByBranch.get(c.branchId) ?? 0
+      if (!laneCardCols.has(lane)) laneCardCols.set(lane, new Set())
+      laneCardCols.get(lane)!.add(c.x)
+    }
+    for (const s of sessions) {
+      const c = s.attachCommitId ? commitByShort.get(s.attachCommitId) : undefined
+      if (c) mark(c)
+    }
+    // also reserve world space for "key" commits that will render commit cards
+    const sessionCommitIds = new Set<string>()
+    for (const s of bundle.sessions) if (s.attachCommitId) sessionCommitIds.add(s.attachCommitId)
+    for (const c of allVisibleCommits) {
+      const isKey = c.isHead || c.isMerge || sessionCommitIds.has(c.id)
+        || visibleBranches.some((b) => b.forkFromCommitId === c.id || b.mergedIntoCommitId === c.id || b.headCommitId === c.id)
+      if (isKey) mark(c)
+    }
+    // Constant world-unit reservation (doesn't depend on zoom — keeps fit stable).
+    // At zoom=1 each card's column gets ~CARD_W+gap of world width; at low zoom
+    // chips will still be readable because they're rendered in screen space (constant
+    // size), and two stacks on adjacent commit columns get pushed apart enough that
+    // their left edges differ by `RESERVE * zoom` — for zoom=0.5 that's CARD_W/2 +
+    // gap/2 of screen px, narrow but okay since most use cases are zoom ≥ 0.6.
+    const RESERVE = CARD_W + CARD_GAP_X
+    const m = new Map<number, number>()
+    const laneNextMin = new Map<number, number>()
+    let pos = PADDING_LEFT
+    for (const col of cols) {
+      for (const [lane, set] of laneCardCols) {
+        if (set.has(col)) {
+          const mn = laneNextMin.get(lane)
+          if (mn !== undefined && mn > pos) pos = mn
+        }
+      }
+      m.set(col, pos)
+      for (const [lane, set] of laneCardCols) {
+        if (set.has(col)) laneNextMin.set(lane, pos + RESERVE)
+      }
+      pos += COMMIT_DX
+    }
+    return { colX: m, contentWorldWidth: pos + PADDING_RIGHT }
+  }, [allVisibleCommits, sessions, laneByBranch, commitByShort, CARD_W])
+
+  const worldX = useCallback(
+    (c: Commit): number => colX.get(c.x) ?? PADDING_LEFT,
+    [colX],
   )
 
   const selectedBranchId = useMemo(() => {
@@ -158,6 +258,27 @@ export function GraphCanvas({
     const wt = bundle.worktrees.find((w) => w.id === selectedWorktreeId)
     return wt?.branchId || null
   }, [bundle.worktrees, selectedWorktreeId])
+
+  // For every commit that is the HEAD of one or more worktrees/branches,
+  // figure out the most useful label (= worktree branch name, fall back to
+  // any branch with that commit as head). One short label per HEAD commit.
+  const headLabelByCommit = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const wt of bundle.worktrees) {
+      const cid = wt.head?.commitId
+      if (!cid) continue
+      const cur = m.get(cid)
+      const name = wt.branchName || ''
+      if (!cur) m.set(cid, name)
+      else if (!cur.includes(name) && cur.split(',').length < 2) m.set(cid, `${cur}, ${name}`)
+    }
+    for (const b of bundle.branches) {
+      const cid = b.headCommitId
+      if (!cid || m.has(cid)) continue
+      m.set(cid, b.name)
+    }
+    return m
+  }, [bundle.worktrees, bundle.branches])
 
   // ----- screen X helper -----
   const toScreenX = useCallback((wx: number) => wx * zoom + pan.x, [zoom, pan.x])
@@ -186,47 +307,150 @@ export function GraphCanvas({
 
     const slots = new Map<string, CardSlot>()
     const rowsByLane = new Map<number, number>()
+    interface OverflowSlot {
+      key: string
+      lane: number
+      worldXLeft: number
+      row: number
+      count: number
+      sessions: CodexSession[]
+    }
+    const overflows: OverflowSlot[] = []
+    // Per-commit vertical stacking:
+    //   • Same commit's sessions → stacked vertically at that commit's anchor x
+    //   • Different commits → sit horizontally along the time axis, never sharing x
+    //   • If a stack would exceed MAX_STACK, the bottom (MAX_STACK-1) cards
+    //     show normally and the rest fold into a single "+N more" overflow chip
+    //     at row MAX_STACK-1 (top of the stack).
     for (const [lane, list] of byLane) {
-      // sort by time (worldX)
-      list.sort((a, b) => {
-        const ca = a.attachCommitId ? commitByShort.get(a.attachCommitId) : undefined
-        const cb = b.attachCommitId ? commitByShort.get(b.attachCommitId) : undefined
-        return (ca ? worldX(ca) : 0) - (cb ? worldX(cb) : 0)
-      })
-      // greedy: place each card in the lowest row where it doesn't overlap the
-      // previously-placed card in that row
-      const rowRight: number[] = [] // right edge (zoomed px) of last card per row
-      let maxRow = 0
+      // Group by commit so same-commit sessions can fold into +N. Each group's
+      // card-stack is ANCHORED to that commit's x (dot-centered) — no horizontal
+      // push-apart, ever. Adjacent commits whose card columns would overlap
+      // simply stack into more rows. This guarantees every visible card sits
+      // directly above its commit dot; eye trace dot ↑ card is always vertical.
+      const byCommit = new Map<string, CodexSession[]>()
       for (const s of list) {
-        const c = s.attachCommitId ? commitByShort.get(s.attachCommitId) : undefined
-        if (!c) continue
-        const left = worldX(c) * zoom
-        let row = 0
-        while (row < rowRight.length && left < rowRight[row] + CARD_GAP_X) row++
-        rowRight[row] = left + CARD_W
-        if (row > maxRow) maxRow = row
-        slots.set(s.id, { session: s, lane, worldXLeft: left, row })
+        const k = s.attachCommitId || ''
+        if (!byCommit.has(k)) byCommit.set(k, [])
+        byCommit.get(k)!.push(s)
+      }
+      const groups = [...byCommit.entries()]
+        .map(([cid, list]) => {
+          const c = commitByShort.get(cid)
+          return { cid, list, anchor: c ? worldX(c) * zoom : 0 }
+        })
+        .filter((g) => commitByShort.has(g.cid))
+        .sort((a, b) => a.anchor - b.anchor)
+
+      // For each group: place at exact (anchor - CARD_W/2). Find the lowest
+      // base row where rows [base, base+stackHeight) all clear. Stack height =
+      // visible cards + (1 if overflow pill).
+      const rowRight: number[] = []  // right edge of last card per row
+      let maxRow = 0
+      for (const g of groups) {
+        const left = g.anchor - CARD_W / 2  // dot-centered
+        g.list.sort((a, b) => (a.date < b.date ? -1 : 1))
+        const visible = g.list.length <= MAX_STACK ? g.list : g.list.slice(0, MAX_STACK - 1)
+        const hiddenCount = g.list.length - visible.length
+        const stackHeight = visible.length + (hiddenCount > 0 ? 1 : 0)
+
+        // find lowest base row where stackHeight contiguous rows all fit
+        let base = 0
+        outer: while (true) {
+          for (let r = 0; r < stackHeight; r++) {
+            const rr = base + r
+            if (rr < rowRight.length && left < rowRight[rr] + 4) {
+              base = rr + 1
+              continue outer
+            }
+          }
+          break
+        }
+        for (let r = 0; r < stackHeight; r++) {
+          const rr = base + r
+          while (rowRight.length <= rr) rowRight.push(-Infinity)
+          rowRight[rr] = left + CARD_W
+        }
+
+        // Visible cards: base..base+visible.length-1 (oldest near lane line = base)
+        visible.forEach((s, i) => {
+          slots.set(s.id, { session: s, lane, worldXLeft: left, row: base + i })
+        })
+        if (hiddenCount > 0) {
+          overflows.push({
+            key: `${lane}-${g.cid}`,
+            lane,
+            worldXLeft: left,
+            row: base + visible.length,
+            count: hiddenCount,
+            sessions: g.list.slice(MAX_STACK - 1),
+          })
+        }
+        const top = base + stackHeight - 1
+        if (top > maxRow) maxRow = top
       }
       rowsByLane.set(lane, list.length ? maxRow + 1 : 0)
     }
 
-    // lay out lanes top→bottom. Each lane band reserves room above its line for
-    // its card rows (all cards rendered above the line for a clean read).
+    // commit cards (BELOW the lane line) — each card stays CENTERED on its dot
+    // (no horizontal push-apart, which was making cards drift away from their
+    // node). Adjacent commits whose cards would overlap drop down into a new
+    // row. A short leader line will connect each card's top to its dot.
+    interface CommitSlot { commit: Commit; lane: number; left: number; row: number }
+    const commitSlots: CommitSlot[] = []
+    const commitsByLane = new Map<number, Commit[]>()
+    const commitRowsByLane = new Map<number, number>()
+    // Only "key" commits get a card below the lane: ones with sessions, HEAD,
+    // merges, fork points, branch heads. Ordinary middle-of-history commits stay
+    // as small dots — otherwise 30+ commit cards per lane crush readability.
+    const sessionCommitIds = new Set<string>()
+    for (const s of bundle.sessions) if (s.attachCommitId) sessionCommitIds.add(s.attachCommitId)
+    for (const c of allVisibleCommits) {
+      const isKey = c.isHead || c.isMerge || sessionCommitIds.has(c.id)
+        || visibleBranches.some((b) => b.forkFromCommitId === c.id || b.mergedIntoCommitId === c.id || b.headCommitId === c.id)
+      if (!isKey) continue
+      const lane = laneByBranch.get(c.branchId) ?? 0
+      if (!commitsByLane.has(lane)) commitsByLane.set(lane, [])
+      commitsByLane.get(lane)!.push(c)
+    }
+    for (const [lane, list] of commitsByLane) {
+      list.sort((a, b) => worldX(a) - worldX(b))
+      const rowRight: number[] = []  // right edge of last card per row
+      let maxRow = 0
+      for (const c of list) {
+        const left = worldX(c) * zoom - COMMIT_CARD_W / 2  // dot-centered, exactly
+        let row = 0
+        while (row < rowRight.length && left < rowRight[row] + 4) row++
+        rowRight[row] = left + COMMIT_CARD_W
+        if (row > maxRow) maxRow = row
+        commitSlots.push({ commit: c, lane, left, row })
+      }
+      commitRowsByLane.set(lane, list.length ? maxRow + 1 : 0)
+    }
+
+    // lay out lanes top→bottom. Each lane band reserves room ABOVE its line for
+    // session cards and BELOW for the commit card row.
     const lanesSorted = [...new Set(visibleBranches.map((b) => b.lane))].sort((a, b) => a - b)
-    const laneCenter = new Map<number, number>() // screen-space centerline (pre-pan)
+    const laneCenter = new Map<number, number>()
+    const laneAbove = new Map<number, number>()
+    const laneBelow = new Map<number, number>()
     let cursor = 12
     for (const lane of lanesSorted) {
       const rows = rowsByLane.get(lane) || 0
       const above = rows > 0 ? LANE_LINE_PAD + rows * (CARD_H + CARD_GAP_Y) : LANE_MIN_TOP
+      const cRows = commitRowsByLane.get(lane) || 0
+      const below = cRows > 0 ? LANE_LINE_PAD + cRows * (COMMIT_H + 4) : LANE_MIN_TOP
       const center = cursor + above
       laneCenter.set(lane, center)
-      cursor = center + LANE_BASE_PAD
+      laneAbove.set(lane, above)
+      laneBelow.set(lane, below)
+      cursor = center + below + LANE_BASE_PAD
     }
     const totalHeight = cursor + 12
 
-    return { slots, rowsByLane, laneCenter, totalHeight }
+    return { slots, rowsByLane, laneCenter, laneAbove, laneBelow, totalHeight, overflows, commitSlots }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessions, laneByBranch, visibleBranches, commitByShort, xMap, zoom])
+  }, [sessions, laneByBranch, visibleBranches, commitByShort, colX, zoom,  allVisibleCommits])
 
   const laneCenterY = useCallback(
     (lane: number) => (layout.laneCenter.get(lane) ?? 0),
@@ -247,6 +471,20 @@ export function GraphCanvas({
 
   const graphTop = AXIS_HEIGHT
   const graphHeight = Math.max(120, containerSize.h - AXIS_HEIGHT)
+
+  // commits that have a visible card (session above OR commit card below) —
+  // their dot gets a distinct color so users immediately see "this dot has cards"
+  const commitsWithSessionCard = useMemo(() => {
+    const set = new Set<string>()
+    for (const s of layout.slots.values()) if (s.session.attachCommitId) set.add(s.session.attachCommitId)
+    for (const o of layout.overflows) for (const s of o.sessions) if (s.attachCommitId) set.add(s.attachCommitId)
+    return set
+  }, [layout])
+  const commitsWithCommitCard = useMemo(() => {
+    const set = new Set<string>()
+    for (const cs of layout.commitSlots) set.add(cs.commit.id)
+    return set
+  }, [layout])
 
   // ----- key commits (dots vs ticks at low zoom) -----
   const effectiveDx = COMMIT_DX * zoom
@@ -275,7 +513,7 @@ export function GraphCanvas({
     }
     return segs
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleBranches, allVisibleCommits, xMap])
+  }, [visibleBranches, allVisibleCommits, colX])
 
   // ----- fork / merge curves -----
   type Curve = { id: string; d: string; merged: boolean; branchId: string }
@@ -312,12 +550,12 @@ export function GraphCanvas({
     }
     return list
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleBranches, allVisibleCommits, commitByShort, xMap, zoom, pan, layout])
+  }, [visibleBranches, allVisibleCommits, commitByShort, colX, zoom, pan, layout])
 
   // ----- date axis ticks (adaptive day granularity) -----
   const MIN_TICK_PX = 56
   const dateTicks = useMemo(() => {
-    const sortedX = Array.from(xMap.keys()).sort((a, b) => a - b)
+    const sortedX = Array.from(colX.keys()).sort((a, b) => a - b)
     const dateByX = new Map<number, string>()
     for (const x of sortedX) {
       const ds = allVisibleCommits.filter((c) => c.x === x).map((c) => c.date).filter(Boolean).sort()
@@ -328,7 +566,7 @@ export function GraphCanvas({
       const d = dateByX.get(x)
       if (!d) continue
       const day = d.slice(0, 10)
-      const wx = PADDING_LEFT + (xMap.get(x) || 0) * COMMIT_DX
+      const wx = colX.get(x) ?? PADDING_LEFT
       if (!dayMap.has(day)) dayMap.set(day, wx)
     }
     const days = [...dayMap.entries()].sort((a, b) => a[1] - b[1])
@@ -348,17 +586,17 @@ export function GraphCanvas({
       lastMonth = m
     }
     return out
-  }, [xMap, allVisibleCommits, zoom])
+  }, [colX, allVisibleCommits, zoom])
 
   // ----- pan / zoom -----
+  // No more shrink-to-fit: keep zoom at 1 so each commit's card gets its full
+  // CARD_W of screen space (commit columns are world-reserved to CARD_W+GAP).
+  // User pans horizontally to traverse the timeline. The Fit button just resets
+  // to 100% and parks at the start (or the focused/live session if any).
   const fitView = useCallback(() => {
-    const w = containerSize.w
-    if (!w) return
-    const sx = (w - 20) / contentWorldWidth
-    const s = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Math.min(sx, 1)))
-    setZoom(s)
+    setZoom(1)
     setPan({ x: 16, y: 12 })
-  }, [containerSize, contentWorldWidth])
+  }, [])
 
   const didFit = useRef(false)
   useEffect(() => {
@@ -368,6 +606,8 @@ export function GraphCanvas({
     didFit.current = true
   }, [containerSize, contentWorldWidth, fitView])
 
+  const didFocusLive = useRef(false)
+
   const zoomRef = useRef(zoom)
   const panRef = useRef(pan)
   useEffect(() => { zoomRef.current = zoom }, [zoom])
@@ -376,6 +616,12 @@ export function GraphCanvas({
     const el = viewportRef.current
     if (!el) return
     const handler = (e: WheelEvent) => {
+      // let scrollable overlays (pinned card, live panel, popover, settings) keep
+      // their own internal scroll — don't hijack the wheel to pan the canvas
+      const t = e.target as HTMLElement | null
+      if (t && t.closest('.pinned-card, .live-panel, .session-popover, .commit-popover, .settings-popover')) {
+        return
+      }
       e.preventDefault()
       const rect = el.getBoundingClientRect()
       const z0 = zoomRef.current
@@ -396,18 +642,38 @@ export function GraphCanvas({
   }, [])
 
   const dragRef = useRef<{ sx: number; sy: number; px: number; py: number } | null>(null)
+  const didDragRef = useRef(false)
   const [isPanning, setIsPanning] = useState(false)
   const onMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     const t = e.target as HTMLElement
     if (t.closest('.canvas__chip-group, .canvas__lane-label-group, .canvas__commit, .pinned-card, .live-panel, button, a, select, input')) return
     dragRef.current = { sx: e.clientX, sy: e.clientY, px: pan.x, py: pan.y }
+    didDragRef.current = false
     setIsPanning(true)
   }
   const onMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!dragRef.current) return
-    setPan({ x: dragRef.current.px + (e.clientX - dragRef.current.sx), y: dragRef.current.py + (e.clientY - dragRef.current.sy) })
+    const dx = e.clientX - dragRef.current.sx
+    const dy = e.clientY - dragRef.current.sy
+    if (Math.abs(dx) + Math.abs(dy) > 4) didDragRef.current = true
+    setPan({ x: dragRef.current.px + dx, y: dragRef.current.py + dy })
   }
   const endPan = () => { dragRef.current = null; setIsPanning(false) }
+  // unified clear-compare helper — called whenever the user moves on to a
+  // different selection (empty click, session click, single-commit click)
+  const clearCompare = useCallback(() => {
+    setCompareCommits(null)
+    setCompareAnchor(null)
+  }, [])
+  // click on empty canvas (not a drag) closes any pinned card / popover + compare
+  const onViewportClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (didDragRef.current) return
+    const t = e.target as HTMLElement
+    if (t.closest('.canvas__chip-group, .canvas__commit, .canvas__lane-label-group, .pinned-card, .live-panel, .session-popover, .commit-popover, .settings-popover, .diff-panel, .diff-hint, button, a, select, input')) return
+    if (pinnedSessionId) onPinSession(null)
+    if (pinnedCommitId) onPinCommit(null)
+    clearCompare()
+  }
   useEffect(() => {
     if (!isPanning) return
     window.addEventListener('mouseup', endPan)
@@ -453,18 +719,100 @@ export function GraphCanvas({
   }, [pinnedSession, selectedWorktreeId, bundle.worktrees])
 
   // live sessions
+  // "Live" panel = everything the user might want pinned at the side: running >
+  // automated > active > pinned-but-inactive. Pinned sessions always show up
+  // (Codex's own pin list) even if they're stale.
   const liveSessions = useMemo(() => {
-    const order: Record<SessionVisualState, number> = { running: 0, automated: 1, active: 2, inactive: 9 }
+    const order: Record<string, number> = { running: 0, automated: 1, active: 2, pinned: 3 }
     return bundle.sessions
-      .map((s) => ({ s, state: sessionStateMap.get(s.id) || 'inactive' }))
-      .filter((x) => x.state !== 'inactive')
+      .map((s) => {
+        const st = sessionStateMap.get(s.id) || 'inactive'
+        return { s, state: st }
+      })
+      .filter((x) => x.state !== 'inactive' || x.s.pinned)
       .sort((a, b) => {
-        const o = order[a.state] - order[b.state]
+        const ka = a.state === 'inactive' ? 'pinned' : a.state
+        const kb = b.state === 'inactive' ? 'pinned' : b.state
+        const o = (order[ka] ?? 9) - (order[kb] ?? 9)
         if (o !== 0) return o
         return (b.s.endDate || b.s.date) > (a.s.endDate || a.s.date) ? 1 : -1
       })
   }, [bundle.sessions, sessionStateMap])
   const [livePanelOpen, setLivePanelOpen] = useState(true)
+
+  // focused session (from Live panel / Now pill) — pan to its CARD's actual
+  // placed position (layout.slots accounts for the horizontal push-apart that
+  // moves cards away from their commit anchor), then keep the highlight ring
+  // persistent until the user clicks something else.
+  const [focusedSessionId, setFocusedSessionId] = useState<string | null>(null)
+  const focusSession = useCallback((id: string) => {
+    setFocusedSessionId(id)
+    const s = bundle.sessions.find((x) => x.id === id)
+    const wt = s ? bundle.worktrees.find((w) => w.id === s.worktreeId) : undefined
+    if (wt) onSelectWorktree(wt.id)
+
+    const slot = layout.slots.get(id)
+    if (slot) {
+      // Normal path: session has a visible card on the canvas → pan to center it.
+      const cardCenterX = slot.worldXLeft + CARD_W / 2
+      const lineY = layout.laneCenter.get(slot.lane) ?? 0
+      const cardTopVsLine = -LANE_LINE_PAD - (slot.row + 1) * (CARD_H + CARD_GAP_Y) + CARD_GAP_Y
+      const cardCenterY = lineY + cardTopVsLine + CARD_H / 2
+      const newX = containerSize.w / 2 - cardCenterX
+      const newY = graphHeight / 2 - cardCenterY
+      const dx = Math.abs(newX - panRef.current.x)
+      const dy = Math.abs(newY - panRef.current.y)
+      if (dx < 2 && dy < 2) {
+        setPan({ x: newX + 12, y: newY })
+        setTimeout(() => setPan({ x: newX, y: newY }), 140)
+      } else {
+        setPan({ x: newX, y: newY })
+      }
+      return
+    }
+    // Fallback A: try to pan to the session's attach commit dot (slot missing
+    // means the layout dropped it, but the commit may still be visible).
+    if (s?.attachCommitId) {
+      const c = commitByShort.get(s.attachCommitId)
+      const lane = c ? laneByBranch.get(c.branchId) : undefined
+      if (c && lane !== undefined) {
+        const dotX = worldX(c) * zoom
+        const lineY = layout.laneCenter.get(lane) ?? 0
+        setPan({ x: containerSize.w / 2 - dotX, y: Math.max(12, graphHeight / 2 - lineY) })
+        return
+      }
+    }
+    // Fallback B: nothing visible to pan to — open the detail card so the user
+    // sees the session info instead of a click that appears to do nothing.
+    onPinSession(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layout, containerSize.w, graphHeight, bundle.sessions, bundle.worktrees, onSelectWorktree, onPinSession, commitByShort, laneByBranch, worldX, zoom, CARD_W])
+
+  // After first fit + layout settles, auto-focus the most-recent live session:
+  //   • highlight the chip (pulsing ring)
+  //   • pan to center it so the user has a clear entry point
+  // Uses layout.slots (which already has worldX*zoom baked in) to avoid the
+  // earlier bug where focus computed pan with stale zoom and pushed cards off-screen.
+  useEffect(() => {
+    if (didFocusLive.current) return
+    if (!didFit.current) return
+    if (liveSessions.length === 0) { didFocusLive.current = true; return }
+    const id = liveSessions[0].s.id
+    const slot = layout.slots.get(id)
+    if (!slot) return  // wait until layout has placed it
+    didFocusLive.current = true
+    setFocusedSessionId(id)
+    const cardCenterX = slot.worldXLeft + CARD_W / 2
+    const lineY = layout.laneCenter.get(slot.lane) ?? 0
+    const cardTopVsLine = -LANE_LINE_PAD - (slot.row + 1) * (CARD_H + CARD_GAP_Y) + CARD_GAP_Y
+    const cardCenterY = lineY + cardTopVsLine + CARD_H / 2
+    setPan({
+      x: containerSize.w / 2 - cardCenterX,
+      y: graphHeight / 2 - cardCenterY,
+    })
+    setTimeout(() => setFocusedSessionId((cur) => (cur === id ? null : cur)), 3500)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layout, liveSessions, containerSize.w, graphHeight])
 
   function isBranchActive(id: string) { return selectedBranchId === id }
   function handleBranchLabelClick(b: Branch) {
@@ -511,6 +859,28 @@ export function GraphCanvas({
           ))}
         </div>
 
+        <button
+          className={`canvas__pin-filter${pinnedOnly ? ' canvas__pin-filter--active' : ''}`}
+          onClick={() => setPinnedOnly((v) => !v)}
+          title={`Show only sessions pinned in Codex (${totalPinned} pinned in this repo)`}
+        >
+          <span className="canvas__pin-filter-icon">📌</span>
+          {pinnedOnly ? 'Pinned only' : 'All sessions'}
+          <span className="canvas__pin-filter-count">{totalPinned}</span>
+        </button>
+
+        {liveSessions.length > 0 && (
+          <button
+            className="canvas__now"
+            onClick={() => { clearCompare(); focusSession(liveSessions[0].s.id) }}
+            title="Jump to most recent live session"
+          >
+            <span className="canvas__now-pulse" />
+            Now: <b>{liveSessions[0].s.title.slice(0, 24)}</b>
+            <span style={{ color: '#10b981', fontSize: '11px' }}>· {liveSessions[0].state}</span>
+          </button>
+        )}
+
         <div className="canvas__zoom">
           <button onClick={() => setZoom((z) => Math.max(MIN_ZOOM, z / 1.2))} title="Zoom out">−</button>
           <span className="canvas__zoom-label">{Math.round(zoom * 100)}%</span>
@@ -524,6 +894,7 @@ export function GraphCanvas({
         ref={viewportRef}
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
+        onClick={onViewportClick}
       >
         {/* date axis */}
         <div className="canvas__axis" style={{ height: AXIS_HEIGHT }}>
@@ -607,30 +978,35 @@ export function GraphCanvas({
               return <line key={`c-${c.id}`} x1={x} y1={y - 3} x2={x} y2={y + 3} className={`canvas__tick${active ? ' canvas__tick--active' : ''}${!mine ? ' canvas__tick--dim' : ''}`} />
             }
             const isPinned = pinnedCommitId === c.id
+            const hasSessionCard = commitsWithSessionCard.has(c.id)
+            const hasCommitCard = commitsWithCommitCard.has(c.id)
+            const dotR = hasSessionCard ? COMMIT_RADIUS + 2.5 : (hasCommitCard ? COMMIT_RADIUS + 1.5 : (c.isMerge ? COMMIT_RADIUS + 1.5 : COMMIT_RADIUS))
             return (
               <g
                 key={`c-${c.id}`}
                 className={`canvas__commit${!mine ? ' canvas__commit--dim' : ''}`}
                 onMouseEnter={() => setHoveredCommitId(c.id)}
                 onMouseLeave={() => setHoveredCommitId(null)}
-                onClick={(e) => { e.stopPropagation(); onPinCommit(c.id) }}
+                onClick={(e) => { e.stopPropagation(); onCommitClick(c, e) }}
               >
                 <circle
                   cx={x}
                   cy={y}
-                  r={c.isMerge ? COMMIT_RADIUS + 1.5 : COMMIT_RADIUS}
-                  className={`canvas__dot${active ? ' canvas__dot--active' : ''}${c.isMerge ? ' canvas__dot--merge' : ''}${c.isHead ? ' canvas__dot--head' : ''}${isPinned ? ' canvas__dot--pinned' : ''}`}
+                  r={dotR}
+                  className={`canvas__dot${active ? ' canvas__dot--active' : ''}${c.isMerge ? ' canvas__dot--merge' : ''}${c.isHead ? ' canvas__dot--head' : ''}${isPinned ? ' canvas__dot--pinned' : ''}${hasSessionCard ? ' canvas__dot--has-session-card' : (hasCommitCard ? ' canvas__dot--has-card' : '')}`}
                 />
-                {c.isHead && (
-                  <foreignObject x={x - 28} y={y - HEAD_OFFSET - 14} width={56} height={16}>
-                    <div className="head-label">HEAD</div>
+                {c.isHead && headLabelByCommit.get(c.id) && (
+                  <foreignObject x={x - 70} y={y - HEAD_OFFSET - 14} width={140} height={16}>
+                    <div className="head-label" title={`HEAD of ${headLabelByCommit.get(c.id)}`}>
+                      {headLabelByCommit.get(c.id)}
+                    </div>
                   </foreignObject>
                 )}
               </g>
             )
           })}
 
-          {/* leader lines: commit → its card (vertical at card left edge) */}
+          {/* leader lines: commit dot → session card ABOVE */}
           {cardList.map(({ session, lane, worldXLeft }) => {
             const c = session.attachCommitId ? commitByShort.get(session.attachCommitId) : undefined
             if (!c) return null
@@ -643,6 +1019,24 @@ export function GraphCanvas({
               <path
                 key={`lead-${session.id}`}
                 d={`M ${dotX},${sp.lineY} L ${dotX},${sp.top + CARD_H} L ${sp.left + 14},${sp.top + CARD_H}`}
+                className={`canvas__chip-leader${dim ? ' canvas__chip-leader--dim' : ''}`}
+                fill="none"
+              />
+            )
+          })}
+
+          {/* leader lines: commit dot → commit card BELOW */}
+          {layout.commitSlots.map((cs) => {
+            const c = cs.commit
+            const dotX = toScreenX(worldX(c))
+            const dotY = laneCenterY(cs.lane) + pan.y
+            const cardTop = dotY + LANE_LINE_PAD + cs.row * (COMMIT_H + 4)
+            const cardCenterX = cs.left + pan.x + COMMIT_CARD_W / 2
+            const dim = !authorMatch(c)
+            return (
+              <path
+                key={`clead-${c.id}`}
+                d={`M ${dotX},${dotY} L ${dotX},${cardTop - 2} L ${cardCenterX},${cardTop - 2}`}
                 className={`canvas__chip-leader${dim ? ' canvas__chip-leader--dim' : ''}`}
                 fill="none"
               />
@@ -676,6 +1070,7 @@ export function GraphCanvas({
             if (sp.top < -CARD_H - 4 || sp.top > graphHeight + 4) return null
             if (sp.left < -CARD_W || sp.left > containerSize.w) return null
             const active = pinnedSessionId === s.id || hoveredSessionId === s.id
+            const focused = focusedSessionId === s.id
             const c = s.attachCommitId ? commitByShort.get(s.attachCommitId) : undefined
             const dim = c && !authorMatch(c)
             const state = sessionStateMap.get(s.id) || 'inactive'
@@ -684,25 +1079,100 @@ export function GraphCanvas({
             return (
               <div
                 key={`card-${s.id}`}
-                className={`canvas__chip-group${dim ? ' canvas__chip-group--dim' : ''}`}
-                style={{ left: sp.left, top: sp.top, width: CARD_W }}
-                onClick={(e) => { e.stopPropagation(); onPinSession(s.id) }}
+                className={`canvas__chip-group${dim ? ' canvas__chip-group--dim' : ''}${''}`}
+                style={{ left: sp.left, top: sp.top, width: CARD_W, height: CARD_H }}
+                onClick={(e) => { e.stopPropagation(); clearCompare(); onPinSession(s.id) }}
                 onMouseEnter={() => setHoveredSessionId(s.id)}
                 onMouseLeave={() => setHoveredSessionId(null)}
               >
                 <div
-                  className={`session-chip session-chip--state-${state}${active ? ' session-chip--active' : ''}${pulse ? ' session-chip--pulse' : ''}`}
+                  className={`session-chip session-chip--state-${state}${active ? ' session-chip--active' : ''}${pulse ? ' session-chip--pulse' : ''}${focused ? ' session-chip--focused' : ''}`}
                   title={s.titleRenamed ? `(renamed) ${s.title}` : s.title}
                 >
                   <div className="session-chip__row1">
                     <span className={`session-chip__state-dot session-chip__state-dot--${state}`} />
                     <span className="session-chip__label">{s.label}</span>
+                    {(() => {
+                      const branchName = bundle.worktrees.find((w) => w.id === s.worktreeId)?.branchName
+                        || bundle.branches.find((b) => b.id === s.branchId)?.name
+                      return branchName ? (
+                        <span className="session-chip__branch" title={`branch: ${branchName}`}>{branchName}</span>
+                      ) : null
+                    })()}
+                    {s.pinned && <span className="session-chip__pin" title="Pinned in Codex">📌</span>}
                     {showAuto && <span className="session-chip__auto" title={`Automation: ${s.automation!.name} (${s.automation!.status})`}>⚡</span>}
                     {s.titleRenamed && <span className="session-chip__renamed" title="Renamed in Codex">✎</span>}
                     {s.attachCommitId && <span className="session-chip__hash" title={`commit ${s.attachCommitId}`}>{s.attachCommitId}</span>}
                     <span className="session-chip__day">{monthDay(s.date)} · {s.durationMin}m</span>
                   </div>
                   <div className="session-chip__title">{s.title}</div>
+                  {/* When the title is a user rename, show what the session was actually about
+                      (the original first-prompt snippet) so the card explains what was done. */}
+                  {s.titleRenamed && s.promptSnippet && s.promptSnippet !== s.title && (
+                    <div className="session-chip__what" title={s.promptSnippet}>
+                      <span className="session-chip__what-icon">›</span>{s.promptSnippet}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+          {/* overflow "+N more" pill — small, sits above the visible card stack */}
+          {layout.overflows.map((o) => {
+            const lineY = laneCenterY(o.lane) + pan.y
+            const top = lineY - LANE_LINE_PAD - (o.row + 1) * (CARD_H + CARD_GAP_Y) + CARD_GAP_Y + (CARD_H - 22)
+            const PILL_W = 110
+            const left = o.worldXLeft + pan.x + (CARD_W - PILL_W) / 2
+            if (top < -22 || top > graphHeight + 4) return null
+            if (left < -PILL_W || left > containerSize.w) return null
+            return (
+              <div
+                key={`ov-${o.key}`}
+                className="canvas__chip-group canvas__chip-group--overflow"
+                style={{ left, top, width: PILL_W, height: 22 }}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  clearCompare()
+                  if (o.sessions[0]) onPinSession(o.sessions[0].id)
+                }}
+                title={o.sessions.map((s) => `${s.label}  ${s.title}`).join('\n')}
+              >
+                <div className="session-chip session-chip--overflow">+{o.count} more</div>
+              </div>
+            )
+          })}
+          {/* commit cards — BELOW the lane line, dot-centered, stack into rows */}
+          {layout.commitSlots.map((cs) => {
+            const c = cs.commit
+            const lineY = laneCenterY(cs.lane) + pan.y
+            const top = lineY + LANE_LINE_PAD + cs.row * (COMMIT_H + 4)
+            const left = cs.left + pan.x
+            if (top < -COMMIT_H - 4 || top > graphHeight + 4) return null
+            if (left < -COMMIT_CARD_W || left > containerSize.w) return null
+            const mine = authorMatch(c)
+            const pinned = pinnedCommitId === c.id
+            const isAttach = pinnedAttachId === c.id
+            const cmpA = compareCommits?.[0] === c.id || compareAnchor === c.id
+            const cmpB = compareCommits?.[1] === c.id
+            return (
+              <div
+                key={`com-${c.id}`}
+                className={`canvas__chip-group canvas__commit-card${!mine ? ' canvas__commit-card--dim' : ''}${pinned || isAttach ? ' canvas__commit-card--active' : ''}${cmpA ? ' canvas__commit-card--cmp-a' : ''}${cmpB ? ' canvas__commit-card--cmp-b' : ''}`}
+                style={{ left, top, width: COMMIT_CARD_W, height: COMMIT_H }}
+                onClick={(e) => { e.stopPropagation(); onCommitClick(c, e) }}
+                onMouseEnter={() => setHoveredCommitId(c.id)}
+                onMouseLeave={() => setHoveredCommitId(null)}
+                title={`${c.id}  ${c.author}\n${c.message}\n\n(Cmd/Ctrl-click to compare with another commit)`}
+              >
+                <div className="commit-card">
+                  <div className="commit-card__row1">
+                    <span className="commit-card__hash">{c.id}</span>
+                    {c.isMerge && <span className="commit-card__tag commit-card__tag--merge">merge</span>}
+                    {c.isHead && <span className="commit-card__tag commit-card__tag--head">HEAD</span>}
+                    <span className="commit-card__author">{c.author}</span>
+                    <span className="commit-card__date">{monthDay(c.date)}</span>
+                  </div>
+                  <div className="commit-card__msg">{c.message}</div>
                 </div>
               </div>
             )
@@ -716,6 +1186,7 @@ export function GraphCanvas({
             if (y < 2 || y > graphHeight - 2) return null
             const active = isBranchActive(b.id)
             const wt = bundle.worktrees.find((w) => w.branchId === b.id)
+            const empty = !wt || wt.sessionCount === 0
             return (
               <div
                 key={`blabel-${b.id}`}
@@ -723,7 +1194,7 @@ export function GraphCanvas({
                 style={{ left: 8, top: y - 13 }}
                 onClick={(e) => { e.stopPropagation(); handleBranchLabelClick(b) }}
               >
-                <div className={`lane-label${active ? ' lane-label--active' : ''}${b.isDefault ? ' lane-label--main' : ''}`}>
+                <div className={`lane-label${active ? ' lane-label--active' : ''}${b.isDefault ? ' lane-label--main' : ''}${empty && !b.isDefault && !active ? ' lane-label--empty' : ''}`}>
                   <span className={`lane-label__dot lane-label__dot--${b.status}`} />
                   <span className="lane-label__name" title={b.name}>{b.name}</span>
                   {b.isDefault && <span className="lane-label__badge lane-label__badge--main">main</span>}
@@ -786,6 +1257,11 @@ export function GraphCanvas({
                 </div>
               )}
               {hoveredSession.promptSnippet && <div className="session-popover__snippet">{hoveredSession.promptSnippet}</div>}
+              {hoveredSession.lastUserSnippet && (
+                <div className="session-popover__snippet session-popover__snippet--last">
+                  <span className="session-chip__last-icon">↩ last:</span> {hoveredSession.lastUserSnippet}
+                </div>
+              )}
               <div className="session-popover__hint">Click to pin →</div>
             </div>
           )
@@ -829,6 +1305,7 @@ export function GraphCanvas({
           <PinnedCommitCard
             commit={pinnedCommit}
             sessionsHere={bundle.sessions.filter((s) => s.attachCommitId === pinnedCommit.id)}
+            repoId={bundle.repo.id}
             onClose={() => onPinCommit(null)}
             onOpenSession={(id) => onPinSession(id)}
           />
@@ -850,13 +1327,14 @@ export function GraphCanvas({
                   liveSessions.map(({ s, state }) => (
                     <button
                       key={s.id}
-                      className={`live-row live-row--${state}`}
-                      onClick={() => onPinSession(s.id)}
+                      className={`live-row live-row--${state}${focusedSessionId === s.id ? ' live-row--focused' : ''}`}
+                      onClick={() => { clearCompare(); focusSession(s.id) }}
                       onMouseEnter={() => setHoveredSessionId(s.id)}
                       onMouseLeave={() => setHoveredSessionId(null)}
                       title={s.title}
                     >
                       <span className={`live-row__dot live-row__dot--${state}`} />
+                      {s.pinned && <span className="live-row__pin" title="Pinned in Codex">📌</span>}
                       <span className="live-row__main">
                         <span className="live-row__title">{s.title}{s.automation && <span className="live-row__auto">⚡</span>}</span>
                         <span className="live-row__meta">
@@ -879,6 +1357,56 @@ export function GraphCanvas({
         {focusWorktree && !pinnedSession && !pinnedCommit && <FloatingWorktreeBadge wt={focusWorktree} />}
 
         {/* legend */}
+        {/* compare-commits diff panel */}
+        {compareCommits && (
+          <div className="diff-panel" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="diff-panel__head">
+              <span className="diff-panel__title">
+                <span className="diff-panel__chip diff-panel__chip--a">{compareCommits[0]}</span>
+                <span className="diff-panel__arrow">→</span>
+                <span className="diff-panel__chip diff-panel__chip--b">{compareCommits[1]}</span>
+              </span>
+              <button
+                className="diff-panel__close"
+                onClick={() => { setCompareCommits(null); setCompareAnchor(null) }}
+              >×</button>
+            </div>
+            <div className="diff-panel__summary">{compareDiff?.summary || 'Computing diff…'}</div>
+            <div className="diff-panel__body">
+              {!compareDiff ? (
+                <div className="diff-panel__empty">…</div>
+              ) : compareDiff.files.length === 0 ? (
+                <div className="diff-panel__empty">No file changes (or commits are identical)</div>
+              ) : (
+                compareDiff.files.slice(0, 40).map((f) => {
+                  const tot = Math.max(f.added + f.removed, 1)
+                  return (
+                    <div key={f.path} className="diff-row">
+                      <span className="diff-row__path" title={f.path}>{f.path}</span>
+                      <span className="diff-row__num diff-row__num--add">+{f.added}</span>
+                      <span className="diff-row__num diff-row__num--del">−{f.removed}</span>
+                      <span className="diff-row__bar">
+                        <span className="diff-row__bar-add" style={{ width: `${(f.added / tot) * 100}%` }} />
+                        <span className="diff-row__bar-del" style={{ width: `${(f.removed / tot) * 100}%` }} />
+                      </span>
+                    </div>
+                  )
+                })
+              )}
+              {compareDiff && compareDiff.files.length > 40 && (
+                <div className="diff-panel__more">+{compareDiff.files.length - 40} more files…</div>
+              )}
+            </div>
+            <div className="diff-panel__hint">Cmd/Ctrl-click another commit to swap the second side</div>
+          </div>
+        )}
+        {compareAnchor && !compareCommits && (
+          <div className="diff-hint">
+            <span className="diff-panel__chip diff-panel__chip--a">{compareAnchor}</span> selected — Cmd/Ctrl-click another commit to diff
+            <button onClick={() => setCompareAnchor(null)}>×</button>
+          </div>
+        )}
+
         <div className="canvas__legend">
           <div className="canvas__legend-group">
             <span className="canvas__legend-item"><span className="canvas__legend-swatch canvas__legend-swatch--commit" />commit</span>
@@ -1015,13 +1543,26 @@ function PinnedSessionCard({
 }
 
 function PinnedCommitCard({
-  commit, sessionsHere, onClose, onOpenSession,
+  commit, sessionsHere, repoId, onClose, onOpenSession,
 }: {
   commit: Commit
   sessionsHere: CodexSession[]
+  repoId: string
   onClose: () => void
   onOpenSession: (id: string) => void
 }) {
+  interface F { path: string; added: number; removed: number; status: string }
+  const [files, setFiles] = useState<F[] | null>(null)
+  const [summary, setSummary] = useState<string>('')
+  useEffect(() => {
+    let cancelled = false
+    setFiles(null); setSummary('')
+    fetch(`/api/commit-files?repo=${encodeURIComponent(repoId)}&commit=${commit.id}`)
+      .then((r) => r.json())
+      .then((d) => { if (!cancelled) { setFiles(d.files || []); setSummary(d.summary || '') } })
+      .catch(() => { if (!cancelled) setFiles([]) })
+    return () => { cancelled = true }
+  }, [commit.id, repoId])
   return (
     <div className="pinned-card pinned-card--commit" onMouseDown={(e) => e.stopPropagation()}>
       <button className="pinned-card__close" onClick={onClose} aria-label="Close">×</button>
@@ -1040,6 +1581,15 @@ function PinnedCommitCard({
           <div><span className="kv-k">refs</span><span className="kv-v kv-v--mono">{commit.refNames.join(', ')}</span></div>
         )}
       </div>
+      <div className="pinned-card__section-title">
+        Changed files {summary && <span className="pinned-card__section-meta">{summary}</span>}
+      </div>
+      <FileDiffList
+        repoId={repoId}
+        a={commit.id}
+        b={null}
+        files={files}
+      />
       {sessionsHere.length > 0 ? (
         <>
           <div className="pinned-card__section-title">Sessions attached here</div>
@@ -1054,11 +1604,84 @@ function PinnedCommitCard({
             ))}
           </div>
         </>
-      ) : (
-        <div className="pinned-card__empty">No Codex sessions attached to this commit.</div>
-      )}
-      <div className="pinned-card__footer">Read-only view · click outside or × to close</div>
+      ) : null}
+      <div className="pinned-card__footer">Read-only · Cmd/Ctrl-click another commit dot to compare</div>
     </div>
+  )
+}
+
+// File list with expandable unified diff per file
+interface DiffFile { path: string; added: number; removed: number; status: string }
+function FileDiffList({ repoId, a, b, files }: { repoId: string; a: string; b: string | null; files: DiffFile[] | null }) {
+  const [open, setOpen] = useState<Set<string>>(new Set())
+  const [diffs, setDiffs] = useState<Record<string, string>>({})
+  function toggle(path: string) {
+    const next = new Set(open)
+    if (next.has(path)) next.delete(path)
+    else {
+      next.add(path)
+      if (!(path in diffs)) {
+        const url = `/api/file-diff?repo=${encodeURIComponent(repoId)}&a=${a}${b ? `&b=${b}` : ''}&file=${encodeURIComponent(path)}`
+        fetch(url).then((r) => r.json()).then((d) => setDiffs((cur) => ({ ...cur, [path]: d.diff || '' })))
+          .catch(() => setDiffs((cur) => ({ ...cur, [path]: '(failed to load)' })))
+      }
+    }
+    setOpen(next)
+  }
+  if (files === null) return <div className="file-diff__loading">Loading file list…</div>
+  if (files.length === 0) return <div className="file-diff__empty">No file changes</div>
+  return (
+    <div className="file-diff__list">
+      {files.slice(0, 60).map((f) => {
+        const tot = Math.max(f.added + f.removed, 1)
+        const isOpen = open.has(f.path)
+        return (
+          <div key={f.path} className={`file-diff__item${isOpen ? ' file-diff__item--open' : ''}`}>
+            <button className="file-diff__row" onClick={() => toggle(f.path)} title={f.path}>
+              <span className="file-diff__caret">{isOpen ? '▾' : '▸'}</span>
+              <span className="file-diff__path">{f.path}</span>
+              <span className="file-diff__num file-diff__num--add">+{f.added}</span>
+              <span className="file-diff__num file-diff__num--del">−{f.removed}</span>
+              <span className="file-diff__bar">
+                <span className="file-diff__bar-add" style={{ width: `${(f.added / tot) * 100}%` }} />
+                <span className="file-diff__bar-del" style={{ width: `${(f.removed / tot) * 100}%` }} />
+              </span>
+            </button>
+            {isOpen && (
+              <div className="file-diff__diff">
+                {!(f.path in diffs) ? (
+                  <div className="file-diff__loading">Loading diff…</div>
+                ) : (
+                  <pre className="file-diff__pre"><DiffRenderer text={diffs[f.path]} /></pre>
+                )}
+              </div>
+            )}
+          </div>
+        )
+      })}
+      {files.length > 60 && (
+        <div className="file-diff__more">+{files.length - 60} more files…</div>
+      )}
+    </div>
+  )
+}
+
+// Tiny unified-diff colorer: + green, - red, @@ blue header
+function DiffRenderer({ text }: { text: string }) {
+  if (!text) return <span className="diff-empty">(no diff)</span>
+  const lines = text.split('\n').slice(0, 2000)
+  return (
+    <>
+      {lines.map((line, i) => {
+        let cls = 'diff-line'
+        if (line.startsWith('+++') || line.startsWith('---')) cls += ' diff-line--file'
+        else if (line.startsWith('@@')) cls += ' diff-line--hunk'
+        else if (line.startsWith('+')) cls += ' diff-line--add'
+        else if (line.startsWith('-')) cls += ' diff-line--del'
+        else if (line.startsWith('diff ') || line.startsWith('index ')) cls += ' diff-line--meta'
+        return <div key={i} className={cls}>{line || ' '}</div>
+      })}
+    </>
   )
 }
 

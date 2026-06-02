@@ -21,6 +21,7 @@ const HOME = os.homedir()
 const SESSIONS_ROOT = path.join(HOME, '.codex', 'sessions')
 const SESSION_INDEX = path.join(HOME, '.codex', 'session_index.jsonl')
 const AUTOMATIONS_ROOT = path.join(HOME, '.codex', 'automations')
+const GLOBAL_STATE = path.join(HOME, '.codex', '.codex-global-state.json')
 const COMMIT_LIMIT = 400
 const SESSION_FILE_LIMIT = 2000
 const SYSTEM_USER_PREFIXES = [
@@ -76,6 +77,7 @@ interface RawSession {
   cliVersion?: string
   originator?: string
   firstUserMsg: string
+  lastUserMsg: string
   transcriptPreview: string
   messageCount: number
   filePath: string
@@ -157,6 +159,7 @@ function readJsonlSession(filePath: string): RawSession | null {
   let messageCount = 0
   let threadName = ''   // last thread_name_updated wins
   let sessionAutomation: RawAutomation | undefined  // replay of automation_update events
+  const lastUserLines: string[] = []  // keep the last few user-message lines (cheap, parse at end)
 
   function applyAutomationUpdate(args: any) {
     if (!args || typeof args !== 'object') return
@@ -191,6 +194,11 @@ function readJsonlSession(filePath: string): RawSession | null {
     // cheap message count (no parse)
     const isMessage = line.indexOf('"type":"message"') !== -1
     if (isMessage) messageCount += 1
+    // remember the last few user-message lines (parsed once after the loop)
+    if (isMessage && line.indexOf('"role":"user"') !== -1) {
+      lastUserLines.push(line)
+      if (lastUserLines.length > 5) lastUserLines.shift()
+    }
 
     if (!meta && line.indexOf('session_meta') !== -1) {
       try {
@@ -260,6 +268,18 @@ function readJsonlSession(filePath: string): RawSession | null {
   const cwd = String(meta.cwd || '')
   if (!cwd) return null
 
+  // last real user message — scan the kept tail lines newest→oldest
+  let lastUserMsg = ''
+  for (let i = lastUserLines.length - 1; i >= 0; i--) {
+    try {
+      const p = JSON.parse(lastUserLines[i]).payload || {}
+      if (p.type === 'message' && p.role === 'user') {
+        const text = pickFirstRealUserMessage(p.content)
+        if (text) { lastUserMsg = text; break }
+      }
+    } catch { /* skip */ }
+  }
+
   const transcriptPreview = [
     firstUserMsg ? `user: ${firstUserMsg.slice(0, 400)}` : '',
     firstAssistantMsg ? `assistant: ${firstAssistantMsg.slice(0, 400)}` : '',
@@ -276,6 +296,7 @@ function readJsonlSession(filePath: string): RawSession | null {
     cliVersion: meta.cli_version,
     originator: meta.originator,
     firstUserMsg,
+    lastUserMsg: lastUserMsg && lastUserMsg !== firstUserMsg ? lastUserMsg : '',
     transcriptPreview,
     messageCount,
     filePath,
@@ -339,6 +360,17 @@ function parseFlatToml(text: string): Record<string, string | number | boolean> 
 }
 
 /** Read ~/.codex/automations/[name]/automation.toml grouped by target_thread_id. */
+function loadPinnedThreadIds(): Set<string> {
+  const set = new Set<string>()
+  try {
+    const raw = fs.readFileSync(GLOBAL_STATE, 'utf8')
+    const obj = JSON.parse(raw) as { 'pinned-thread-ids'?: string[] }
+    const arr = obj['pinned-thread-ids']
+    if (Array.isArray(arr)) for (const id of arr) if (id) set.add(String(id))
+  } catch { /* missing → no pins */ }
+  return set
+}
+
 function loadAutomations(): Map<string, SessionAutomation> {
   const m = new Map<string, SessionAutomation>()
   let entries: fs.Dirent[]
@@ -507,6 +539,7 @@ function buildBundle(
   rawSessions: RawSession[],
   sessionIndex: Map<string, { threadName: string; updatedAt?: string }>,
   automations: Map<string, SessionAutomation>,
+  pinnedIds: Set<string>,
 ): RepoBundle | null {
   const rawWorktrees = gitWorktrees(repoPath)
   const allCommits = gitLogAll(repoPath)
@@ -830,6 +863,8 @@ function buildBundle(
           ? firstUser.replace(/\s+/g, ' ').trim().slice(0, 80) || '(empty prompt)'
           : '(no user prompt)'
       const snippet = firstUser ? firstUser.replace(/\s+/g, ' ').trim().slice(0, 220) : ''
+      const lastUser = (s.lastUserMsg || '').replace(/\s+/g, ' ').trim()
+      const lastUserSnippet = lastUser ? lastUser.slice(0, 220) : ''
       // Automation binding: prefer the live toml (authoritative current status),
       // else fall back to the automation the session created itself (in-session
       // automation_update replay) — catches automations with no toml on disk.
@@ -862,12 +897,15 @@ function buildBundle(
         renameSource,
         promptSnippet: snippet,
         prompt: (firstUser || '').slice(0, 4000),
+        lastUserSnippet,
+        lastUserPrompt: lastUser.slice(0, 4000),
         model: s.model || 'unknown',
         cliVersion: s.cliVersion,
         originator: s.originator,
         transcriptPreview: s.transcriptPreview,
         messageCount: s.messageCount,
         automation,
+        pinned: pinnedIds.has(s.id),
       })
       wt.sessionCount += 1
     })
@@ -983,6 +1021,9 @@ function saveToplevelCache(obj: Record<string, string | null>) {
 }
 
 // ---- disk-persisted per-file cache (keyed by path + mtime + size) ----
+// Bump CACHE_VERSION whenever the parsed RawSession shape changes, so stale
+// caches from older builds are discarded instead of serving missing fields.
+const CACHE_VERSION = 3
 const FILE_CACHE_PATH = path.join(os.tmpdir(), 'sessiontree-session-cache.json')
 interface FileCacheEntry { mtimeMs: number; size: number; session: RawSession | null }
 let fileCache: Map<string, FileCacheEntry> | null = null
@@ -992,17 +1033,19 @@ function loadFileCache(): Map<string, FileCacheEntry> {
   fileCache = new Map()
   try {
     const raw = fs.readFileSync(FILE_CACHE_PATH, 'utf8')
-    const obj = JSON.parse(raw) as Record<string, FileCacheEntry>
-    for (const [k, v] of Object.entries(obj)) fileCache.set(k, v)
+    const obj = JSON.parse(raw) as { version?: number; entries?: Record<string, FileCacheEntry> }
+    if (obj && obj.version === CACHE_VERSION && obj.entries) {
+      for (const [k, v] of Object.entries(obj.entries)) fileCache.set(k, v)
+    }
   } catch { /* no cache yet */ }
   return fileCache
 }
 
 function saveFileCache(c: Map<string, FileCacheEntry>) {
   try {
-    const obj: Record<string, FileCacheEntry> = {}
-    for (const [k, v] of c) obj[k] = v
-    fs.writeFileSync(FILE_CACHE_PATH, JSON.stringify(obj))
+    const entries: Record<string, FileCacheEntry> = {}
+    for (const [k, v] of c) entries[k] = v
+    fs.writeFileSync(FILE_CACHE_PATH, JSON.stringify({ version: CACHE_VERSION, entries }))
   } catch { /* best effort */ }
 }
 
@@ -1021,6 +1064,76 @@ function readJsonlSessionCached(filePath: string, c: Map<string, FileCacheEntry>
   const session = readJsonlSession(filePath)
   c.set(filePath, { mtimeMs: st.mtimeMs, size: st.size, session })
   return session
+}
+
+// repoId → repo root (filled by scanAll); used by gitDiffBetween
+const repoPathById = new Map<string, string>()
+
+interface DiffFile { path: string; added: number; removed: number; status: string }
+
+export function gitCommitFiles(repoId: string, commit: string): { files: DiffFile[]; summary: string } {
+  const repo = repoPathById.get(repoId)
+  if (!repo) return { files: [], summary: 'repo not found' }
+  const out = safeExec('git', ['-C', repo, 'show', '--numstat', '--format=%h %s', commit], '/')
+  // first line(s) = format, then blank, then numstat lines
+  const lines = out.split('\n')
+  let summaryLine = ''
+  const files: DiffFile[] = []
+  let totalAdd = 0
+  let totalDel = 0
+  for (const line of lines) {
+    if (!line.trim()) continue
+    if (!summaryLine && !line.match(/^[-0-9]+\t/)) { summaryLine = line; continue }
+    const parts = line.split('\t')
+    if (parts.length < 3) continue
+    const added = parts[0] === '-' ? 0 : parseInt(parts[0], 10) || 0
+    const removed = parts[1] === '-' ? 0 : parseInt(parts[1], 10) || 0
+    const p = parts.slice(2).join('\t')
+    files.push({ path: p, added, removed, status: 'M' })
+    totalAdd += added
+    totalDel += removed
+  }
+  return { files, summary: `${summaryLine}    ${files.length} files · +${totalAdd} / -${totalDel}` }
+}
+
+export function gitFileDiff(repoId: string, a: string, b: string | null, file: string): { diff: string } {
+  const repo = repoPathById.get(repoId)
+  if (!repo) return { diff: 'repo not found' }
+  // b=null means show the single commit's diff for this file: `git show <a> -- <file>`
+  const args = b
+    ? ['-C', repo, 'diff', '--no-color', '-U3', `${a}..${b}`, '--', file]
+    : ['-C', repo, 'show', '--no-color', '-U3', '--format=', a, '--', file]
+  const out = safeExec('git', args, '/')
+  // cap to a few hundred KB
+  return { diff: out.slice(0, 200_000) }
+}
+
+export function gitDiffBetween(repoId: string, a: string, b: string): { files: DiffFile[]; summary: string } {
+  const repo = repoPathById.get(repoId)
+  if (!repo) return { files: [], summary: 'repo not found' }
+  // numstat: "<added>\t<removed>\t<path>"
+  const out = safeExec('git', ['-C', repo, 'diff', '--numstat', `${a}..${b}`], '/')
+  const files: DiffFile[] = []
+  let totalAdd = 0
+  let totalDel = 0
+  for (const line of out.split('\n')) {
+    if (!line.trim()) continue
+    const parts = line.split('\t')
+    if (parts.length < 3) continue
+    const added = parts[0] === '-' ? 0 : parseInt(parts[0], 10) || 0
+    const removed = parts[1] === '-' ? 0 : parseInt(parts[1], 10) || 0
+    const p = parts.slice(2).join('\t')
+    files.push({ path: p, added, removed, status: 'M' })
+    totalAdd += added
+    totalDel += removed
+  }
+  // commit subject summary on each side
+  const subjA = safeExec('git', ['-C', repo, 'log', '-1', '--pretty=%h %s', a], '/').trim()
+  const subjB = safeExec('git', ['-C', repo, 'log', '-1', '--pretty=%h %s', b], '/').trim()
+  return {
+    files,
+    summary: `${subjA}  →  ${subjB}    ${files.length} files · +${totalAdd} / -${totalDel}`,
+  }
 }
 
 export function scanAll(force = false): ApiPayload {
@@ -1102,15 +1215,18 @@ export function scanAll(force = false): ApiPayload {
   // 3. load auxiliary indices used across bundles
   const sessionIndex = loadSessionIndex()
   const automations = loadAutomations()
+  const pinnedIds = loadPinnedThreadIds()
 
   // 4. build bundles
   const bundles: Record<string, RepoBundle> = {}
   const repos: Repo[] = []
+  repoPathById.clear()
   for (const [repoPath, sList] of merged) {
-    const bundle = buildBundle(repoPath, sList, sessionIndex, automations)
+    const bundle = buildBundle(repoPath, sList, sessionIndex, automations, pinnedIds)
     if (!bundle) continue
     bundles[bundle.repo.id] = bundle
     repos.push(bundle.repo)
+    repoPathById.set(bundle.repo.id, repoPath)
   }
 
   // sort repos by session count desc
