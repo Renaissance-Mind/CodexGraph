@@ -69,6 +69,11 @@ function latestIso(values: string[]): string {
   return latest
 }
 
+function isWithinPath(child: string, parent: string): boolean {
+  const rel = path.relative(parent, child)
+  return rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel))
+}
+
 // ----------------- Codex session parsing -----------------
 
 interface RawAutomation {
@@ -440,6 +445,65 @@ function findAllSessionFiles(): string[] {
   return out
 }
 
+const ARCHIVE_SCAN_SKIP_DIRS = new Set([
+  '.git',
+  '.venv',
+  'venv',
+  'node_modules',
+  'dist',
+  'build',
+  '.next',
+  '__pycache__',
+])
+
+function collectJsonlFiles(dir: string, out: string[]) {
+  let entries: fs.Dirent[]
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return
+  }
+  for (const ent of entries) {
+    const full = path.join(dir, ent.name)
+    if (ent.isDirectory()) collectJsonlFiles(full, out)
+    else if (ent.isFile() && ent.name.endsWith('.jsonl')) out.push(full)
+  }
+}
+
+function findArchivedSessionFiles(repoPath: string): string[] {
+  const out: string[] = []
+  const seenRoots = new Set<string>()
+  const roots = gitWorktrees(repoPath).map((w) => w.path)
+
+  function walk(dir: string) {
+    let entries: fs.Dirent[]
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const ent of entries) {
+      if (!ent.isDirectory()) continue
+      if (ent.isSymbolicLink()) continue
+      if (ARCHIVE_SCAN_SKIP_DIRS.has(ent.name)) continue
+      const full = path.join(dir, ent.name)
+      if (ent.name === 'codex_session_log') {
+        collectJsonlFiles(path.join(full, 'sessions'), out)
+        continue
+      }
+      walk(full)
+    }
+  }
+
+  for (const root of roots) {
+    const resolved = path.resolve(root)
+    if (seenRoots.has(resolved)) continue
+    seenRoots.add(resolved)
+    walk(resolved)
+  }
+  return out
+}
+
 // ----------------- Git repo discovery -----------------
 
 function gitToplevel(cwd: string): string | null {
@@ -464,6 +528,13 @@ function gitDefaultBranch(repoPath: string): string {
   }
   // fallback: first listed branch
   return branches[0] || 'main'
+}
+
+function gitLocalBranches(repoPath: string): string[] {
+  return safeExec('git', ['-C', repoPath, 'for-each-ref', '--format=%(refname:short)', 'refs/heads'], '/')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
 }
 
 interface RawWorktree {
@@ -579,7 +650,7 @@ function buildBundle(
   const repoId = slugify(repoName + '-' + path.dirname(repoPath).split(path.sep).slice(-1)[0])
 
   // Build worktrees + decide branches set
-  const usedBranchNames = new Set<string>()
+  const usedBranchNames = new Set<string>(gitLocalBranches(repoPath))
   usedBranchNames.add(defaultBranchName)
 
   const worktrees: Worktree[] = rawWorktrees.map((rw, i) => {
@@ -611,9 +682,6 @@ function buildBundle(
       },
     }
   })
-
-  // Also include branches that have no worktree but appear in refs and have sessions
-  // (we'll add them lazily after session attach)
 
   // Build branches array
   const branchesMap = new Map<string, Branch>()
@@ -819,18 +887,27 @@ function buildBundle(
 
   // Attach sessions to worktrees: match by cwd
   const wtByPath = new Map<string, Worktree>()
+  const wtRoots: { absPath: string; wt: Worktree }[] = []
   for (const wt of worktrees) {
     const absPath = wt.path.startsWith('~') ? wt.path.replace('~', HOME) : wt.path
     wtByPath.set(absPath, wt)
+    wtRoots.push({ absPath, wt })
   }
+  wtRoots.sort((a, b) => b.absPath.length - a.absPath.length)
   const primary = worktrees.find((w) => w.isPrimary)!
+
+  function worktreeForCwd(cwd: string): Worktree {
+    const exact = wtByPath.get(cwd)
+    if (exact) return exact
+    const resolved = path.resolve(cwd)
+    return wtRoots.find(({ absPath }) => isWithinPath(resolved, path.resolve(absPath)))?.wt || primary
+  }
 
   const codexSessions: CodexSession[] = []
   // group raw sessions by worktree, sort by start time, assign labels
   const groups = new Map<string, RawSession[]>()
   for (const s of rawSessions) {
-    const cwd = s.cwd
-    const wt = wtByPath.get(cwd) || primary
+    const wt = worktreeForCwd(s.cwd)
     if (!groups.has(wt.id)) groups.set(wt.id, [])
     groups.get(wt.id)!.push(s)
   }
@@ -1010,22 +1087,21 @@ function buildBundle(
     }
   }
 
+  const branchHasCommit = new Set<string>()
+  for (const c of commits) branchHasCommit.add(c.branchId)
+  const branchList = [...branchesMap.values()].filter((b) => b.headCommitId || branchHasCommit.has(b.id) || b.isDefault)
+
   const repo: Repo = {
     id: repoId,
     name: repoName,
     path: repoPath.replace(HOME, '~'),
     lastUsedAt: latestIso(codexSessions.map((s) => s.endDate || s.date)) || commits[commits.length - 1]?.date || '',
     worktreeIds: worktrees.map((w) => w.id),
-    branchIds: [...branchesMap.values()].map((b) => b.id),
+    branchIds: branchList.map((b) => b.id),
     defaultBranchId,
     sessionCount: codexSessions.length,
     commitCount: commits.length,
   }
-
-  // Drop branches with no commits at all
-  const branchHasCommit = new Set<string>()
-  for (const c of commits) branchHasCommit.add(c.branchId)
-  const branchList = [...branchesMap.values()].filter((b) => branchHasCommit.has(b.id) || b.isDefault)
 
   return {
     repo,
@@ -1115,6 +1191,25 @@ function readJsonlSessionCached(filePath: string, c: Map<string, FileCacheEntry>
   return session
 }
 
+function dedupeSessions(rawSessions: RawSession[]): RawSession[] {
+  const byId = new Map<string, RawSession>()
+  for (const session of rawSessions) {
+    const prev = byId.get(session.id)
+    if (!prev) {
+      byId.set(session.id, session)
+      continue
+    }
+    const sessionEnd = Date.parse(session.endTs) || 0
+    const prevEnd = Date.parse(prev.endTs) || 0
+    const sessionDepth = session.cwd.split(path.sep).length
+    const prevDepth = prev.cwd.split(path.sep).length
+    if (sessionEnd > prevEnd || (sessionEnd === prevEnd && sessionDepth > prevDepth)) {
+      byId.set(session.id, session)
+    }
+  }
+  return [...byId.values()]
+}
+
 // repoId → repo root (filled by scanAll); used by gitDiffBetween
 const repoPathById = new Map<string, string>()
 
@@ -1189,23 +1284,24 @@ export function scanAll(force = false): ApiPayload {
   if (!force && cache && Date.now() - cache.ts < CACHE_TTL_MS) return cache.payload
 
   // 1. read all session files — incremental: only re-parse changed/new files
-  const files = findAllSessionFiles()
+  const rootFiles = findAllSessionFiles()
   const fc = loadFileCache()
   const seenPaths = new Set<string>()
   const sessions: RawSession[] = []
   let reparsed = 0
-  for (const f of files) {
+
+  function readSessionFile(f: string): RawSession | null {
     seenPaths.add(f)
     const before = fc.get(f)
     const s = readJsonlSessionCached(f, fc)
-    if (!before || before.mtimeMs !== fc.get(f)!.mtimeMs) reparsed += 1
-    if (s) sessions.push(s)
+    const after = fc.get(f)
+    if (!before || !after || before.mtimeMs !== after.mtimeMs || before.size !== after.size) reparsed += 1
+    return s
   }
-  // drop cache entries for files that no longer exist
-  for (const k of [...fc.keys()]) if (!seenPaths.has(k)) fc.delete(k)
-  saveFileCache(fc)
-  if (process.env.SESSIONTREE_DEBUG) {
-    console.log(`[scan] ${files.length} files, ${reparsed} (re)parsed, ${files.length - reparsed} from cache`)
+
+  for (const f of rootFiles) {
+    const s = readSessionFile(f)
+    if (s) sessions.push(s)
   }
 
   // 2. group by repo root (via git toplevel of cwd) — toplevel is disk-cached
@@ -1259,6 +1355,29 @@ export function scanAll(force = false): ApiPayload {
     const c = canonical.get(top) || top
     if (!merged.has(c)) merged.set(c, [])
     merged.get(c)!.push(...sList)
+  }
+
+  let archivedFileCount = 0
+  for (const repoPath of [...merged.keys()]) {
+    const archivedFiles = findArchivedSessionFiles(repoPath)
+    for (const f of archivedFiles) {
+      if (seenPaths.has(f)) continue
+      archivedFileCount += 1
+      const s = readSessionFile(f)
+      if (s) merged.get(repoPath)!.push(s)
+    }
+  }
+
+  for (const [repoPath, sList] of merged) merged.set(repoPath, dedupeSessions(sList))
+
+  // drop cache entries for files that no longer exist in the known scan roots
+  for (const k of [...fc.keys()]) if (!seenPaths.has(k)) fc.delete(k)
+  saveFileCache(fc)
+  if (process.env.SESSIONTREE_DEBUG) {
+    console.log(
+      `[scan] ${seenPaths.size} files (${rootFiles.length} global + ${archivedFileCount} archived), ` +
+      `${reparsed} (re)parsed, ${seenPaths.size - reparsed} from cache`,
+    )
   }
 
   // 3. load auxiliary indices used across bundles

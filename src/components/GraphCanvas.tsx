@@ -145,18 +145,15 @@ export function GraphCanvas({
 
   // visible branches (lane filter)
   const visibleBranches: Branch[] = useMemo(() => {
-    // Branches that actually carry at least one session (across the whole repo).
-    // Lanes with zero sessions are noise — hide them by default; the default
-    // branch always stays visible as the trunk reference.
     const branchesWithSessions = new Set<string>()
     for (const s of bundle.sessions) if (s.branchId) branchesWithSessions.add(s.branchId)
-    const base = bundle.branches.filter((b) => b.isDefault || branchesWithSessions.has(b.id))
+    const branchWithWt = new Set<string>()
+    for (const wt of bundle.worktrees) if (wt.branchId) branchWithWt.add(wt.branchId)
+    if (filter === 'branches') return bundle.branches
     if (filter === 'worktrees') {
-      const branchWithWt = new Set<string>()
-      for (const wt of bundle.worktrees) if (wt.branchId) branchWithWt.add(wt.branchId)
-      return base.filter((b) => b.isDefault || branchWithWt.has(b.id))
+      return bundle.branches.filter((b) => b.isDefault || branchWithWt.has(b.id))
     }
-    return base
+    return bundle.branches.filter((b) => b.isDefault || branchesWithSessions.has(b.id) || branchWithWt.has(b.id))
   }, [bundle, filter])
 
   const laneByBranch = useMemo(() => {

@@ -18,6 +18,7 @@ CodexGraph scans your **real** `~/.codex/sessions/**/*.jsonl` files and your loc
 - 🔍 **Commit details** — click any commit to see changed files; expand to view unified diffs inline (like GitHub)
 - 🆚 **Commit compare** — Cmd/Ctrl-click two commits to see a full `git diff --numstat` with expandable per-file diffs
 - 🕘 **Recent-first projects** — project list and default selection use the repo with the latest Codex session activity
+- 🗄️ **Archived session logs** — also indexes repo-local `codex_session_log/sessions` archives produced by tool runtimes
 
 **Strictly read-only** 🔒 — CodexGraph never creates worktrees, switches branches, runs Codex, merges, deletes, or writes any git/session state.
 
@@ -41,7 +42,7 @@ npm run dev
 
 | Feature | Description |
 |---------|-------------|
-| 🗂️ **Multi-repo** | Auto-discovers all repos from your Codex session `cwd`s |
+| 🗂️ **Multi-repo** | Auto-discovers repos from Codex session `cwd`s and known repo-local session archives |
 | 🌳 **Git DAG** | Horizontal main branch + fork/merge curves, commit dots, branch labels |
 | 🃏 **Session cards** | Multi-line cards above the lane: status dot · label · branch pill · hash · date · title · prompt snippet · last user message |
 | 📊 **Commit cards** | Below the lane: hash · author · date · commit message (cool-grey background) |
@@ -53,7 +54,7 @@ npm run dev
 | 🏷️ **Session rename** | Reads Codex app renames (`session_index.jsonl`) + CLI `thread_name_updated` events |
 | ⚡ **Automation detection** | Parses `automations/*.toml` + replays in-session `automation_update` events |
 | 🟢 **Status colors** | inactive (grey) · active (blue) · automated (purple) · running (green pulse) |
-| 🗃️ **Full incremental scan** | Scans every local session file, with per-file mtime+size cache, git toplevel cache, large-file head+tail sampling |
+| 🗃️ **Full incremental scan** | Scans every local/global session file plus repo-local archives, with per-file mtime+size cache, git toplevel cache, large-file head+tail sampling |
 | 🕘 **Recent-first projects** | Repo selector and initial default repo are ordered by latest session activity |
 | 🔍 **Commit diff viewer** | Click a commit to see changed files + expandable unified diffs inline |
 | 🆚 **Commit compare** | Cmd/Ctrl-click two commits for side-by-side `git diff` with per-file bar charts |
@@ -90,6 +91,7 @@ npm run dev
 | Source | What it provides |
 |--------|-----------------|
 | `~/.codex/sessions/**/*.jsonl` | Session metadata, first/last user message, model, CLI version, automation events |
+| `<repo>/**/codex_session_log/sessions/**/*.jsonl` | Repo-local archived Codex SDK/runtime sessions, matched back to the owning worktree |
 | `~/.codex/session_index.jsonl` | App-level session renames (thread_name) |
 | `~/.codex/.codex-global-state.json` | Pinned thread IDs |
 | `~/.codex/automations/*/automation.toml` | Heartbeat automation configs (target thread, status, rrule) |
