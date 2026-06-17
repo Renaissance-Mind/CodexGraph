@@ -23,7 +23,6 @@ const SESSION_INDEX = path.join(HOME, '.codex', 'session_index.jsonl')
 const AUTOMATIONS_ROOT = path.join(HOME, '.codex', 'automations')
 const GLOBAL_STATE = path.join(HOME, '.codex', '.codex-global-state.json')
 const COMMIT_LIMIT = 400
-const SESSION_FILE_LIMIT = 2000
 const SYSTEM_USER_PREFIXES = [
   '<environment_context>',
   '<user_instructions>',
@@ -55,6 +54,19 @@ function slugify(s: string): string {
 
 function shortHash(h: string): string {
   return h.slice(0, 7)
+}
+
+function latestIso(values: string[]): string {
+  let latest = ''
+  let latestMs = Number.NEGATIVE_INFINITY
+  for (const value of values) {
+    const ms = Date.parse(value)
+    if (Number.isFinite(ms) && ms > latestMs) {
+      latest = value
+      latestMs = ms
+    }
+  }
+  return latest
 }
 
 // ----------------- Codex session parsing -----------------
@@ -1002,6 +1014,7 @@ function buildBundle(
     id: repoId,
     name: repoName,
     path: repoPath.replace(HOME, '~'),
+    lastUsedAt: latestIso(codexSessions.map((s) => s.endDate || s.date)) || commits[commits.length - 1]?.date || '',
     worktreeIds: worktrees.map((w) => w.id),
     branchIds: [...branchesMap.values()].map((b) => b.id),
     defaultBranchId,
@@ -1176,7 +1189,7 @@ export function scanAll(force = false): ApiPayload {
   if (!force && cache && Date.now() - cache.ts < CACHE_TTL_MS) return cache.payload
 
   // 1. read all session files — incremental: only re-parse changed/new files
-  const files = findAllSessionFiles().slice(0, SESSION_FILE_LIMIT)
+  const files = findAllSessionFiles()
   const fc = loadFileCache()
   const seenPaths = new Set<string>()
   const sessions: RawSession[] = []
@@ -1265,12 +1278,16 @@ export function scanAll(force = false): ApiPayload {
     repoPathById.set(bundle.repo.id, repoPath)
   }
 
-  // sort repos by session count desc
-  repos.sort((a, b) => b.sessionCount - a.sessionCount)
+  // Project list and default repo follow the most recently used repo first.
+  repos.sort((a, b) => {
+    const byLastUsed = Date.parse(b.lastUsedAt || '') - Date.parse(a.lastUsedAt || '')
+    if (Number.isFinite(byLastUsed) && byLastUsed !== 0) return byLastUsed
+    const bySessionCount = b.sessionCount - a.sessionCount
+    if (bySessionCount !== 0) return bySessionCount
+    return a.name.localeCompare(b.name)
+  })
 
-  // default repo: prefer 'EditReward' if present (per requirements doc), else top of list
-  const preferred = repos[0] // default to highest session count
-  const defaultRepoId = preferred?.id || repos[0]?.id || ''
+  const defaultRepoId = repos[0]?.id || ''
 
   const payload: ApiPayload = {
     syncedAt: new Date().toISOString(),

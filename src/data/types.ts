@@ -6,6 +6,7 @@ export interface Repo {
   id: string                // slug derived from repo root path
   name: string              // basename of repo root
   path: string              // absolute repo root (primary worktree)
+  lastUsedAt: string        // latest session event timestamp; falls back to latest commit date
   worktreeIds: string[]
   branchIds: string[]
   defaultBranchId: string

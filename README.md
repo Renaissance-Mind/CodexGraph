@@ -17,6 +17,7 @@ CodexGraph scans your **real** `~/.codex/sessions/**/*.jsonl` files and your loc
 - 🔄 **Live sessions** — active / running / automated sessions highlighted in a side panel with real-time status
 - 🔍 **Commit details** — click any commit to see changed files; expand to view unified diffs inline (like GitHub)
 - 🆚 **Commit compare** — Cmd/Ctrl-click two commits to see a full `git diff --numstat` with expandable per-file diffs
+- 🕘 **Recent-first projects** — project list and default selection use the repo with the latest Codex session activity
 
 **Strictly read-only** 🔒 — CodexGraph never creates worktrees, switches branches, runs Codex, merges, deletes, or writes any git/session state.
 
@@ -32,7 +33,7 @@ npm run dev
 # open http://localhost:17001
 ```
 
-> ⏳ First scan takes ~14s. Subsequent loads are instant (30-min memory cache + disk-persisted incremental file cache).
+> ⏳ The first scan walks the full local session archive. Subsequent loads are fast (30-min memory cache + disk-persisted incremental file cache).
 
 ---
 
@@ -52,7 +53,8 @@ npm run dev
 | 🏷️ **Session rename** | Reads Codex app renames (`session_index.jsonl`) + CLI `thread_name_updated` events |
 | ⚡ **Automation detection** | Parses `automations/*.toml` + replays in-session `automation_update` events |
 | 🟢 **Status colors** | inactive (grey) · active (blue) · automated (purple) · running (green pulse) |
-| 🗃️ **Incremental scan** | Per-file mtime+size cache, git toplevel cache, large-file head+tail sampling |
+| 🗃️ **Full incremental scan** | Scans every local session file, with per-file mtime+size cache, git toplevel cache, large-file head+tail sampling |
+| 🕘 **Recent-first projects** | Repo selector and initial default repo are ordered by latest session activity |
 | 🔍 **Commit diff viewer** | Click a commit to see changed files + expandable unified diffs inline |
 | 🆚 **Commit compare** | Cmd/Ctrl-click two commits for side-by-side `git diff` with per-file bar charts |
 
