@@ -98,6 +98,13 @@ export function GraphCanvas({
   const [authorFilter, setAuthorFilter] = useState<string>('all')
   const [pinnedOnly, setPinnedOnly] = useState(false)
   const totalPinned = useMemo(() => bundle.sessions.filter((s) => s.pinned).length, [bundle.sessions])
+  const displaySessions = useMemo(
+    () => (pinnedOnly ? bundle.sessions.filter((s) => s.pinned) : bundle.sessions),
+    [bundle.sessions, pinnedOnly],
+  )
+  const sessionMetaLabel = pinnedOnly
+    ? `${displaySessions.length}/${bundle.sessions.length} pinned sessions`
+    : `${bundle.sessions.length} sessions`
 
   // Cmd-click two commits to compare (git diff style). [a, b] in click order.
   const [compareCommits, setCompareCommits] = useState<[string, string] | null>(null)
@@ -146,7 +153,7 @@ export function GraphCanvas({
   // visible branches (lane filter)
   const visibleBranches: Branch[] = useMemo(() => {
     const branchesWithSessions = new Set<string>()
-    for (const s of bundle.sessions) if (s.branchId) branchesWithSessions.add(s.branchId)
+    for (const s of displaySessions) if (s.branchId) branchesWithSessions.add(s.branchId)
     const branchWithWt = new Set<string>()
     for (const wt of bundle.worktrees) if (wt.branchId) branchWithWt.add(wt.branchId)
     if (filter === 'branches') return bundle.branches
@@ -154,7 +161,7 @@ export function GraphCanvas({
       return bundle.branches.filter((b) => b.isDefault || branchWithWt.has(b.id))
     }
     return bundle.branches.filter((b) => b.isDefault || branchesWithSessions.has(b.id) || branchWithWt.has(b.id))
-  }, [bundle, filter])
+  }, [bundle.branches, bundle.worktrees, displaySessions, filter])
 
   const laneByBranch = useMemo(() => {
     const m = new Map<string, number>()
@@ -183,12 +190,11 @@ export function GraphCanvas({
   // sessions attached to a visible commit
   const visibleCommitIds = useMemo(() => new Set(allVisibleCommits.map((c) => c.id)), [allVisibleCommits])
   const sessions: CodexSession[] = useMemo(
-    () => bundle.sessions.filter((s) =>
+    () => displaySessions.filter((s) =>
       s.attachCommitId
       && visibleCommitIds.has(s.attachCommitId)
-      && (!pinnedOnly || s.pinned)
     ),
-    [bundle.sessions, visibleCommitIds, pinnedOnly],
+    [displaySessions, visibleCommitIds],
   )
 
   // ----- variable-width commit columns (world space, pre-zoom) -----
@@ -213,7 +219,7 @@ export function GraphCanvas({
     }
     // also reserve world space for "key" commits that will render commit cards
     const sessionCommitIds = new Set<string>()
-    for (const s of bundle.sessions) if (s.attachCommitId) sessionCommitIds.add(s.attachCommitId)
+    for (const s of displaySessions) if (s.attachCommitId) sessionCommitIds.add(s.attachCommitId)
     for (const c of allVisibleCommits) {
       const isKey = c.isHead || c.isMerge || sessionCommitIds.has(c.id)
         || visibleBranches.some((b) => b.forkFromCommitId === c.id || b.mergedIntoCommitId === c.id || b.headCommitId === c.id)
@@ -243,7 +249,7 @@ export function GraphCanvas({
       pos += COMMIT_DX
     }
     return { colX: m, contentWorldWidth: pos + PADDING_RIGHT }
-  }, [allVisibleCommits, sessions, laneByBranch, commitByShort, CARD_W])
+  }, [allVisibleCommits, sessions, laneByBranch, commitByShort, displaySessions, visibleBranches, CARD_W])
 
   const worldX = useCallback(
     (c: Commit): number => colX.get(c.x) ?? PADDING_LEFT,
@@ -401,7 +407,7 @@ export function GraphCanvas({
     // merges, fork points, branch heads. Ordinary middle-of-history commits stay
     // as small dots — otherwise 30+ commit cards per lane crush readability.
     const sessionCommitIds = new Set<string>()
-    for (const s of bundle.sessions) if (s.attachCommitId) sessionCommitIds.add(s.attachCommitId)
+    for (const s of displaySessions) if (s.attachCommitId) sessionCommitIds.add(s.attachCommitId)
     for (const c of allVisibleCommits) {
       const isKey = c.isHead || c.isMerge || sessionCommitIds.has(c.id)
         || visibleBranches.some((b) => b.forkFromCommitId === c.id || b.mergedIntoCommitId === c.id || b.headCommitId === c.id)
@@ -447,7 +453,7 @@ export function GraphCanvas({
 
     return { slots, rowsByLane, laneCenter, laneAbove, laneBelow, totalHeight, overflows, commitSlots }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessions, laneByBranch, visibleBranches, commitByShort, colX, zoom,  allVisibleCommits])
+  }, [sessions, displaySessions, laneByBranch, visibleBranches, commitByShort, colX, zoom,  allVisibleCommits])
 
   const laneCenterY = useCallback(
     (lane: number) => (layout.laneCenter.get(lane) ?? 0),
@@ -489,14 +495,14 @@ export function GraphCanvas({
   const keyCommitIds = useMemo(() => {
     const set = new Set<string>()
     for (const c of allVisibleCommits) if (c.isHead || c.isMerge) set.add(c.id)
-    for (const s of bundle.sessions) if (s.attachCommitId) set.add(s.attachCommitId)
+    for (const s of displaySessions) if (s.attachCommitId) set.add(s.attachCommitId)
     for (const b of visibleBranches) {
       if (b.forkFromCommitId) set.add(b.forkFromCommitId)
       if (b.mergedIntoCommitId) set.add(b.mergedIntoCommitId)
       if (b.headCommitId) set.add(b.headCommitId)
     }
     return set
-  }, [allVisibleCommits, bundle.sessions, visibleBranches])
+  }, [allVisibleCommits, displaySessions, visibleBranches])
 
   // ----- branch baseline segments (screen space) -----
   const branchSegments = useMemo(() => {
@@ -690,6 +696,10 @@ export function GraphCanvas({
   const pinnedSession = pinnedSessionId ? sessionMap.get(pinnedSessionId) || null : null
   const pinnedCommit = pinnedCommitId ? commitByShort.get(pinnedCommitId) || null : null
 
+  useEffect(() => {
+    if (pinnedOnly && pinnedSession && !pinnedSession.pinned) onPinSession(null)
+  }, [pinnedOnly, pinnedSession, onPinSession])
+
   const pinnedAttachId = pinnedSession?.attachCommitId
   const pinnedAttachScreen = useMemo(() => {
     if (!pinnedAttachId) return null
@@ -703,11 +713,11 @@ export function GraphCanvas({
 
   const relatedSessions = useMemo(() => {
     if (!pinnedSession) return [] as CodexSession[]
-    return bundle.sessions
+    return displaySessions
       .filter((s) => s.worktreeId === pinnedSession.worktreeId && s.id !== pinnedSession.id)
       .sort((a, b) => (a.date > b.date ? -1 : 1))
       .slice(0, 8)
-  }, [pinnedSession, bundle.sessions])
+  }, [pinnedSession, displaySessions])
 
   const focusWorktree = useMemo(() => {
     if (pinnedSession) return bundle.worktrees.find((w) => w.id === pinnedSession.worktreeId) || null
@@ -721,12 +731,12 @@ export function GraphCanvas({
   // (Codex's own pin list) even if they're stale.
   const liveSessions = useMemo(() => {
     const order: Record<string, number> = { running: 0, automated: 1, active: 2, pinned: 3 }
-    return bundle.sessions
+    return displaySessions
       .map((s) => {
         const st = sessionStateMap.get(s.id) || 'inactive'
         return { s, state: st }
       })
-      .filter((x) => x.state !== 'inactive' || x.s.pinned)
+      .filter((x) => pinnedOnly || x.state !== 'inactive' || x.s.pinned)
       .sort((a, b) => {
         const ka = a.state === 'inactive' ? 'pinned' : a.state
         const kb = b.state === 'inactive' ? 'pinned' : b.state
@@ -734,8 +744,16 @@ export function GraphCanvas({
         if (o !== 0) return o
         return (b.s.endDate || b.s.date) > (a.s.endDate || a.s.date) ? 1 : -1
       })
-  }, [bundle.sessions, sessionStateMap])
+  }, [displaySessions, pinnedOnly, sessionStateMap])
   const [livePanelOpen, setLivePanelOpen] = useState(true)
+
+  const visibleSessionCountByWorktree = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const s of displaySessions) {
+      m.set(s.worktreeId, (m.get(s.worktreeId) || 0) + 1)
+    }
+    return m
+  }, [displaySessions])
 
   // focused session (from Live panel / Now pill) — pan to its CARD's actual
   // placed position (layout.slots accounts for the horizontal push-apart that
@@ -826,7 +844,7 @@ export function GraphCanvas({
         <div className="canvas__title">Git × Worktree Lineage</div>
         <div className="canvas__head-meta">
           {bundle.commits.length} commits · {bundle.branches.length} branches ·{' '}
-          {bundle.worktrees.length} worktrees · {bundle.sessions.length} sessions
+          {bundle.worktrees.length} worktrees · {sessionMetaLabel}
         </div>
 
         <label className="canvas__author">
@@ -870,10 +888,10 @@ export function GraphCanvas({
           <button
             className="canvas__now"
             onClick={() => { clearCompare(); focusSession(liveSessions[0].s.id) }}
-            title="Jump to most recent live session"
+            title={pinnedOnly ? 'Jump to most recent pinned session' : 'Jump to most recent live session'}
           >
             <span className="canvas__now-pulse" />
-            Now: <b>{liveSessions[0].s.title.slice(0, 24)}</b>
+            {pinnedOnly ? 'Pinned' : 'Now'}: <b>{liveSessions[0].s.title.slice(0, 24)}</b>
             <span style={{ color: '#10b981', fontSize: '11px' }}>· {liveSessions[0].state}</span>
           </button>
         )}
@@ -1183,7 +1201,8 @@ export function GraphCanvas({
             if (y < 2 || y > graphHeight - 2) return null
             const active = isBranchActive(b.id)
             const wt = bundle.worktrees.find((w) => w.branchId === b.id)
-            const empty = !wt || wt.sessionCount === 0
+            const visibleSessionCount = wt ? visibleSessionCountByWorktree.get(wt.id) || 0 : 0
+            const empty = !wt || visibleSessionCount === 0
             return (
               <div
                 key={`blabel-${b.id}`}
@@ -1198,8 +1217,13 @@ export function GraphCanvas({
                   {b.mergedIntoBranchId && <span className="lane-label__badge lane-label__badge--merged">merged</span>}
                   {b.status === 'dirty' && !b.isDefault && <span className="lane-label__badge lane-label__badge--dirty">dirty</span>}
                   {b.status === 'unmerged' && <span className="lane-label__badge lane-label__badge--unmerged">unmerged</span>}
-                  {wt && wt.sessionCount > 0 && (
-                    <span className="lane-label__sessions" title={`${wt.sessionCount} Codex sessions`}>{wt.sessionCount}</span>
+                  {wt && visibleSessionCount > 0 && (
+                    <span
+                      className="lane-label__sessions"
+                      title={pinnedOnly ? `${visibleSessionCount} pinned Codex sessions` : `${visibleSessionCount} Codex sessions`}
+                    >
+                      {visibleSessionCount}
+                    </span>
                   )}
                 </div>
               </div>
@@ -1301,7 +1325,7 @@ export function GraphCanvas({
         {pinnedCommit && !pinnedSession && (
           <PinnedCommitCard
             commit={pinnedCommit}
-            sessionsHere={bundle.sessions.filter((s) => s.attachCommitId === pinnedCommit.id)}
+            sessionsHere={displaySessions.filter((s) => s.attachCommitId === pinnedCommit.id)}
             repoId={bundle.repo.id}
             onClose={() => onPinCommit(null)}
             onOpenSession={(id) => onPinSession(id)}
@@ -1312,14 +1336,16 @@ export function GraphCanvas({
         {!pinnedSession && !pinnedCommit && (
           <div className={`live-panel${livePanelOpen ? '' : ' live-panel--collapsed'}`}>
             <button className="live-panel__head" onClick={() => setLivePanelOpen((v) => !v)}>
-              <span className="live-panel__title"><span className="live-panel__pulse" />Live sessions</span>
+              <span className="live-panel__title"><span className="live-panel__pulse" />{pinnedOnly ? 'Pinned sessions' : 'Live sessions'}</span>
               <span className="live-panel__count">{liveSessions.length}</span>
               <span className="live-panel__chevron">{livePanelOpen ? '▸' : '◂'}</span>
             </button>
             {livePanelOpen && (
               <div className="live-panel__body">
                 {liveSessions.length === 0 ? (
-                  <div className="live-panel__empty">No active sessions in this repo.</div>
+                  <div className="live-panel__empty">
+                    {pinnedOnly ? 'No pinned sessions in this repo.' : 'No active sessions in this repo.'}
+                  </div>
                 ) : (
                   liveSessions.map(({ s, state }) => (
                     <button
