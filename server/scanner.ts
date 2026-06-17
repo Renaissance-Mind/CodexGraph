@@ -88,6 +88,8 @@ interface RawAutomation {
 interface RawSession {
   id: string
   cwd: string
+  /** Paths where tools actually ran or edited files; used to infer worktree ownership beyond session_meta.cwd. */
+  pathHints: string[]
   startTs: string
   endTs: string
   model: string
@@ -131,6 +133,8 @@ function pickFirstRealUserMessage(content: unknown): string {
 const FULL_SCAN_MAX = 8 * 1024 * 1024
 const HEAD_BYTES = 2 * 1024 * 1024
 const TAIL_BYTES = 1 * 1024 * 1024
+const TOOL_SCAN_CHUNK_BYTES = 1024 * 1024
+const MAX_PATH_HINTS = 1000
 
 function readSampledLines(filePath: string): { lines: string[]; truncated: boolean } | null {
   let fd: number
@@ -163,6 +167,41 @@ function readSampledLines(filePath: string): { lines: string[]; truncated: boole
   }
 }
 
+function isToolCallLine(line: string): boolean {
+  return (
+    line.indexOf('"type":"function_call"') !== -1 ||
+    line.indexOf('"type":"custom_tool_call"') !== -1
+  )
+}
+
+function scanToolCallLines(filePath: string, onLine: (line: string) => void) {
+  let fd: number
+  try {
+    fd = fs.openSync(filePath, 'r')
+  } catch {
+    return
+  }
+  try {
+    const buf = Buffer.allocUnsafe(TOOL_SCAN_CHUNK_BYTES)
+    let carry = ''
+    while (true) {
+      const n = fs.readSync(fd, buf, 0, buf.length, null)
+      if (!n) break
+      const text = carry + buf.toString('utf8', 0, n)
+      const lines = text.split('\n')
+      carry = lines.pop() || ''
+      for (const line of lines) {
+        if (isToolCallLine(line)) onLine(line)
+      }
+    }
+    if (carry && isToolCallLine(carry)) onLine(carry)
+  } catch {
+    return
+  } finally {
+    fs.closeSync(fd)
+  }
+}
+
 function readJsonlSession(filePath: string): RawSession | null {
   const sampled = readSampledLines(filePath)
   if (!sampled) return null
@@ -177,6 +216,7 @@ function readJsonlSession(filePath: string): RawSession | null {
   let threadName = ''   // last thread_name_updated wins
   let sessionAutomation: RawAutomation | undefined  // replay of automation_update events
   const lastUserLines: string[] = []  // keep the last few user-message lines (cheap, parse at end)
+  const pathHints: string[] = []
 
   function applyAutomationUpdate(args: any) {
     if (!args || typeof args !== 'object') return
@@ -194,6 +234,57 @@ function readJsonlSession(filePath: string): RawSession | null {
       status: String(args.status || sessionAutomation?.status || 'ACTIVE').toUpperCase(),
       rrule: args.rrule ? String(args.rrule) : sessionAutomation?.rrule,
       promptSnippet: prompt ? prompt.replace(/\s+/g, ' ').slice(0, 240) : sessionAutomation?.promptSnippet,
+    }
+  }
+
+  function addPathHint(value: unknown) {
+    if (typeof value !== 'string' || !value.startsWith('/')) return
+    if (pathHints.length >= MAX_PATH_HINTS) pathHints.shift()
+    pathHints.push(value)
+  }
+
+  function collectCommandPathHints(cmd: unknown, workdir: unknown) {
+    if (typeof cmd !== 'string') return
+    const base = typeof workdir === 'string' && workdir.startsWith('/') ? workdir : ''
+    const absRe = /\/(?:Users|private|tmp|var|Volumes)\/[^\s"'`<>|;&()]+/g
+    for (const match of cmd.matchAll(absRe)) {
+      addPathHint(match[0].replace(/[,\].:]+$/, ''))
+    }
+    const gitCRe = /\bgit\s+-C\s+(['"]?)([^'"\s;&]+)\1/g
+    for (const match of cmd.matchAll(gitCRe)) {
+      const target = match[2]
+      if (target.startsWith('/')) addPathHint(target)
+      else if (base) addPathHint(path.resolve(base, target))
+    }
+  }
+
+  function collectApplyPatchPaths(input: string) {
+    for (const line of input.split('\n')) {
+      const m = line.match(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/)
+      if (m) addPathHint(m[1])
+    }
+  }
+
+  function collectToolPathHints(p: any) {
+    if (!p || typeof p !== 'object') return
+    if (p.type === 'function_call') {
+      let args: any = p.arguments
+      if (typeof args === 'string') {
+        try {
+          args = JSON.parse(args)
+        } catch {
+          args = null
+        }
+      }
+      if (p.name === 'exec_command') {
+        addPathHint(args?.workdir)
+        collectCommandPathHints(args?.cmd, args?.workdir)
+      }
+      else if (p.name === 'view_image') addPathHint(args?.path)
+      return
+    }
+    if (p.type === 'custom_tool_call' && p.name === 'apply_patch' && typeof p.input === 'string') {
+      collectApplyPatchPaths(p.input)
     }
   }
 
@@ -249,6 +340,11 @@ function readJsonlSession(filePath: string): RawSession | null {
       } catch { /* skip */ }
       continue
     }
+    if (!sampled.truncated && isToolCallLine(line)) {
+      try {
+        collectToolPathHints(JSON.parse(line).payload)
+      } catch { /* skip */ }
+    }
     // turn_context may carry the model before any message
     if (!model && line.indexOf('turn_context') !== -1) {
       try {
@@ -272,6 +368,13 @@ function readJsonlSession(filePath: string): RawSession | null {
         }
       } catch { /* skip */ }
     }
+  }
+  if (sampled.truncated) {
+    scanToolCallLines(filePath, (line) => {
+      try {
+        collectToolPathHints(JSON.parse(line).payload)
+      } catch { /* skip */ }
+    })
   }
   // end timestamp from the last line that has one (no full parse)
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -307,6 +410,7 @@ function readJsonlSession(filePath: string): RawSession | null {
   return {
     id: String(meta.id),
     cwd,
+    pathHints,
     startTs: startTs || meta.timestamp || '',
     endTs: endTs || meta.timestamp || '',
     model: model || meta.model || '',
@@ -896,18 +1000,39 @@ function buildBundle(
   wtRoots.sort((a, b) => b.absPath.length - a.absPath.length)
   const primary = worktrees.find((w) => w.isPrimary)!
 
-  function worktreeForCwd(cwd: string): Worktree {
-    const exact = wtByPath.get(cwd)
+  function worktreeForPath(inputPath: string): Worktree {
+    return maybeWorktreeForPath(inputPath) || primary
+  }
+
+  function maybeWorktreeForPath(inputPath: string): Worktree | null {
+    const exact = wtByPath.get(inputPath)
     if (exact) return exact
-    const resolved = path.resolve(cwd)
-    return wtRoots.find(({ absPath }) => isWithinPath(resolved, path.resolve(absPath)))?.wt || primary
+    const resolved = path.resolve(inputPath)
+    return wtRoots.find(({ absPath }) => isWithinPath(resolved, path.resolve(absPath)))?.wt || null
+  }
+
+  function worktreeForSession(s: RawSession): Worktree {
+    const scores = new Map<string, { wt: Worktree; score: number; lastSeen: number }>()
+    s.pathHints.forEach((hint, idx) => {
+      const wt = maybeWorktreeForPath(hint)
+      if (!wt) return
+      const cur = scores.get(wt.id)
+      if (cur) {
+        cur.score += 1
+        cur.lastSeen = idx
+      } else {
+        scores.set(wt.id, { wt, score: 1, lastSeen: idx })
+      }
+    })
+    const best = [...scores.values()].sort((a, b) => (b.score - a.score) || (b.lastSeen - a.lastSeen))[0]
+    return best?.wt || worktreeForPath(s.cwd)
   }
 
   const codexSessions: CodexSession[] = []
   // group raw sessions by worktree, sort by start time, assign labels
   const groups = new Map<string, RawSession[]>()
   for (const s of rawSessions) {
-    const wt = worktreeForCwd(s.cwd)
+    const wt = worktreeForSession(s)
     if (!groups.has(wt.id)) groups.set(wt.id, [])
     groups.get(wt.id)!.push(s)
   }
@@ -1148,7 +1273,7 @@ function saveToplevelCache(obj: Record<string, string | null>) {
 // ---- disk-persisted per-file cache (keyed by path + mtime + size) ----
 // Bump CACHE_VERSION whenever the parsed RawSession shape changes, so stale
 // caches from older builds are discarded instead of serving missing fields.
-const CACHE_VERSION = 3
+const CACHE_VERSION = 5
 const FILE_CACHE_PATH = path.join(os.tmpdir(), 'sessiontree-session-cache.json')
 interface FileCacheEntry { mtimeMs: number; size: number; session: RawSession | null }
 let fileCache: Map<string, FileCacheEntry> | null = null
