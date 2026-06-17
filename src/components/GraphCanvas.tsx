@@ -31,9 +31,9 @@ export function sessionState(
 }
 
 // ---- geometry constants ----
-// Coordinate model: X is zoomable (time). Y is SCREEN-space — lanes are laid out
-// in fixed pixel bands whose height grows to fit each lane's packed card rows, so
-// cards never overlap each other or neighbouring lanes. Only pan moves Y.
+// Coordinate model: X is zoomable (time). Y is SCREEN-space — branch rails use
+// compact fixed spacing, while cards are packed as callouts around real
+// card/card and card/rail collisions. Only pan moves Y.
 const COMMIT_DX = 26          // world px between adjacent commit columns (before zoom)
 const PADDING_LEFT = 130      // world px before first commit (room for fork-in)
 const PADDING_RIGHT = 80
@@ -45,9 +45,12 @@ const CARD_W_DETAIL = 360
 const CARD_H_DETAIL = 88
 const CARD_GAP_X = 10
 const CARD_GAP_Y_DETAIL = 8
-const LANE_LINE_PAD = 14
-const LANE_BASE_PAD = 22
-const LANE_MIN_TOP = 22
+const CARD_RAIL_GAP = 12
+const CARD_COLLISION_GAP = 8
+const RAIL_COLLISION_X_PAD = 8
+const RAIL_COLLISION_Y_PAD = 3
+const RAIL_TOP_PAD = CARD_H_DETAIL + 34
+const BRANCH_RAIL_GAP = 92
 const MAX_STACK_DETAIL = 3
 const COMMIT_CARD_W = 260
 const COMMIT_CARD_H_DETAIL = 60
@@ -201,9 +204,9 @@ export function GraphCanvas({
   // Columns are NOT equal-width. Walking left→right in time order, whenever a
   // lane carries a session card at a column we reserve ~one card-width of world
   // space before that lane's NEXT card, so consecutive cards on the same lane
-  // sit side-by-side (row 0) instead of stacking upward. Commits with no cards
-  // keep the compact base spacing. The time axis becomes non-uniform — that's
-  // intentional (cards readability > strict time-linearity).
+  // can stay in their preferred callout positions instead of stacking away from
+  // the rail. Commits with no cards keep the compact base spacing. The time axis
+  // becomes non-uniform — that's intentional (cards readability > strict time-linearity).
   const { colX, contentWorldWidth } = useMemo(() => {
     const cols = Array.from(new Set(allVisibleCommits.map((c) => c.x))).sort((a, b) => a - b)
     // lane -> set of commit x-cols that bear either a session card OR a commit card
@@ -287,19 +290,56 @@ export function GraphCanvas({
   const toScreenX = useCallback((wx: number) => wx * zoom + pan.x, [zoom, pan.x])
 
   // ----------------------------------------------------------------------------
-  // LAYOUT: per-lane greedy card packing + dynamic lane bands (Y in screen space)
+  // LAYOUT: compact branch rails + global callout packing (Y in screen space)
   // ----------------------------------------------------------------------------
-  // Card placement is per session: each card's LEFT edge sits at its commit's
-  // (zoomed, pan-independent) x. Cards on the same lane that would overlap are
-  // pushed up into additional rows (row 0 = nearest the lane line). The number of
-  // rows a lane needs depends only on zoom, so vertical layout is stable on pan.
+  // Branch rails stay in fixed compact lanes. Session and commit cards are then
+  // placed as callouts near their commit x, moving only when their real rectangle
+  // collides with another card or a visible branch rail segment.
   interface CardSlot {
     session: CodexSession
     lane: number
     worldXLeft: number   // pan-independent: worldX * zoom (left edge)
-    row: number          // 0 = nearest lane line, grows away
+    top: number          // pan-independent screen Y, before vertical pan
   }
   const layout = useMemo(() => {
+    const lanesSorted = [...new Set(visibleBranches.map((b) => b.lane))].sort((a, b) => a - b)
+    const laneCenter = new Map<number, number>()
+    lanesSorted.forEach((lane, i) => {
+      laneCenter.set(lane, RAIL_TOP_PAD + i * BRANCH_RAIL_GAP)
+    })
+
+    interface Box { left: number; right: number; top: number; bottom: number }
+    const occupied: Box[] = []
+    function boxCollides(box: Box): boolean {
+      return occupied.some((o) =>
+        box.left < o.right + CARD_COLLISION_GAP &&
+        box.right > o.left - CARD_COLLISION_GAP &&
+        box.top < o.bottom + CARD_COLLISION_GAP &&
+        box.bottom > o.top - CARD_COLLISION_GAP
+      )
+    }
+    function boxesFit(boxes: Box[]): boolean {
+      return boxes.every((box) => !boxCollides(box))
+    }
+    function occupy(boxes: Box[]) {
+      occupied.push(...boxes)
+    }
+
+    for (const b of visibleBranches) {
+      const laneY = laneCenter.get(b.lane)
+      if (laneY === undefined) continue
+      const xs = allVisibleCommits
+        .filter((c) => c.branchId === b.id)
+        .map((c) => worldX(c) * zoom)
+      if (xs.length === 0) continue
+      occupied.push({
+        left: Math.min(...xs) - RAIL_COLLISION_X_PAD,
+        right: Math.max(...xs) + RAIL_COLLISION_X_PAD,
+        top: laneY - RAIL_COLLISION_Y_PAD,
+        bottom: laneY + RAIL_COLLISION_Y_PAD,
+      })
+    }
+
     // group sessions by lane
     const byLane = new Map<number, CodexSession[]>()
     for (const s of sessions) {
@@ -309,149 +349,152 @@ export function GraphCanvas({
     }
 
     const slots = new Map<string, CardSlot>()
-    const rowsByLane = new Map<number, number>()
     interface OverflowSlot {
       key: string
       lane: number
       worldXLeft: number
-      row: number
+      top: number
       count: number
       sessions: CodexSession[]
     }
     const overflows: OverflowSlot[] = []
-    // Per-commit vertical stacking:
-    //   • Same commit's sessions → stacked vertically at that commit's anchor x
-    //   • Different commits → sit horizontally along the time axis, never sharing x
-    //   • If a stack would exceed MAX_STACK, the bottom (MAX_STACK-1) cards
-    //     show normally and the rest fold into a single "+N more" overflow chip
-    //     at row MAX_STACK-1 (top of the stack).
+
+    interface SessionGroup {
+      lane: number
+      cid: string
+      list: CodexSession[]
+      left: number
+      anchor: number
+      laneY: number
+    }
+    const sessionGroups: SessionGroup[] = []
     for (const [lane, list] of byLane) {
-      // Group by commit so same-commit sessions can fold into +N. Each group's
-      // card-stack is ANCHORED to that commit's x (dot-centered) — no horizontal
-      // push-apart, ever. Adjacent commits whose card columns would overlap
-      // simply stack into more rows. This guarantees every visible card sits
-      // directly above its commit dot; eye trace dot ↑ card is always vertical.
       const byCommit = new Map<string, CodexSession[]>()
       for (const s of list) {
         const k = s.attachCommitId || ''
         if (!byCommit.has(k)) byCommit.set(k, [])
         byCommit.get(k)!.push(s)
       }
-      const groups = [...byCommit.entries()]
-        .map(([cid, list]) => {
-          const c = commitByShort.get(cid)
-          return { cid, list, anchor: c ? worldX(c) * zoom : 0 }
+      for (const [cid, list] of byCommit) {
+        const c = commitByShort.get(cid)
+        const laneY = laneCenter.get(lane)
+        if (!c || laneY === undefined) continue
+        const anchor = worldX(c) * zoom
+        sessionGroups.push({
+          lane,
+          cid,
+          list,
+          left: anchor - CARD_W / 2,
+          anchor,
+          laneY,
         })
-        .filter((g) => commitByShort.has(g.cid))
-        .sort((a, b) => a.anchor - b.anchor)
-
-      // For each group: place at exact (anchor - CARD_W/2). Find the lowest
-      // base row where rows [base, base+stackHeight) all clear. Stack height =
-      // visible cards + (1 if overflow pill).
-      const rowRight: number[] = []  // right edge of last card per row
-      let maxRow = 0
-      for (const g of groups) {
-        const left = g.anchor - CARD_W / 2  // dot-centered
-        g.list.sort((a, b) => (a.date < b.date ? -1 : 1))
-        const visible = g.list.length <= MAX_STACK ? g.list : g.list.slice(0, MAX_STACK - 1)
-        const hiddenCount = g.list.length - visible.length
-        const stackHeight = visible.length + (hiddenCount > 0 ? 1 : 0)
-
-        // find lowest base row where stackHeight contiguous rows all fit
-        let base = 0
-        outer: while (true) {
-          for (let r = 0; r < stackHeight; r++) {
-            const rr = base + r
-            if (rr < rowRight.length && left < rowRight[rr] + 4) {
-              base = rr + 1
-              continue outer
-            }
-          }
-          break
-        }
-        for (let r = 0; r < stackHeight; r++) {
-          const rr = base + r
-          while (rowRight.length <= rr) rowRight.push(-Infinity)
-          rowRight[rr] = left + CARD_W
-        }
-
-        // Visible cards: base..base+visible.length-1 (oldest near lane line = base)
-        visible.forEach((s, i) => {
-          slots.set(s.id, { session: s, lane, worldXLeft: left, row: base + i })
-        })
-        if (hiddenCount > 0) {
-          overflows.push({
-            key: `${lane}-${g.cid}`,
-            lane,
-            worldXLeft: left,
-            row: base + visible.length,
-            count: hiddenCount,
-            sessions: g.list.slice(MAX_STACK - 1),
-          })
-        }
-        const top = base + stackHeight - 1
-        if (top > maxRow) maxRow = top
       }
-      rowsByLane.set(lane, list.length ? maxRow + 1 : 0)
+    }
+    sessionGroups.sort((a, b) => (a.anchor - b.anchor) || (a.laneY - b.laneY))
+
+    const PILL_W = 110
+    const PILL_H = 22
+    const SEARCH_ROWS = 18
+    function stackTops(laneY: number, itemCount: number, side: 'above' | 'below', offsetRows: number): number[] {
+      const step = CARD_H + CARD_GAP_Y
+      return Array.from({ length: itemCount }, (_, i) => {
+        if (side === 'above') return laneY - CARD_RAIL_GAP - CARD_H - (i + offsetRows) * step
+        return laneY + CARD_RAIL_GAP + (i + offsetRows) * step
+      })
+    }
+    function stackBoxes(left: number, tops: number[], overflowIndex: number): Box[] {
+      return tops.map((top, i) => {
+        if (i === overflowIndex) {
+          const pillLeft = left + (CARD_W - PILL_W) / 2
+          return { left: pillLeft, right: pillLeft + PILL_W, top: top + CARD_H - PILL_H, bottom: top + CARD_H }
+        }
+        return { left, right: left + CARD_W, top, bottom: top + CARD_H }
+      })
+    }
+    for (const g of sessionGroups) {
+      g.list.sort((a, b) => (a.date < b.date ? -1 : 1))
+      const visible = g.list.length <= MAX_STACK ? g.list : g.list.slice(0, MAX_STACK - 1)
+      const hiddenCount = g.list.length - visible.length
+      const overflowIndex = hiddenCount > 0 ? visible.length : -1
+      const itemCount = visible.length + (hiddenCount > 0 ? 1 : 0)
+      let chosen: { side: 'above' | 'below'; tops: number[]; boxes: Box[] } | null = null
+
+      for (let offset = 0; offset < SEARCH_ROWS && !chosen; offset++) {
+        for (const side of ['above', 'below'] as const) {
+          const tops = stackTops(g.laneY, itemCount, side, offset)
+          const boxes = stackBoxes(g.left, tops, overflowIndex)
+          if (boxesFit(boxes)) {
+            chosen = { side, tops, boxes }
+            break
+          }
+        }
+      }
+      if (!chosen) {
+        const tops = stackTops(g.laneY, itemCount, 'above', SEARCH_ROWS)
+        chosen = { side: 'above', tops, boxes: stackBoxes(g.left, tops, overflowIndex) }
+      }
+
+      visible.forEach((s, i) => {
+        slots.set(s.id, { session: s, lane: g.lane, worldXLeft: g.left, top: chosen!.tops[i] })
+      })
+      if (hiddenCount > 0) {
+        overflows.push({
+          key: `${g.lane}-${g.cid}`,
+          lane: g.lane,
+          worldXLeft: g.left,
+          top: chosen.tops[overflowIndex] + CARD_H - PILL_H,
+          count: hiddenCount,
+          sessions: g.list.slice(MAX_STACK - 1),
+        })
+      }
+      occupy(chosen.boxes)
     }
 
-    // commit cards (BELOW the lane line) — each card stays CENTERED on its dot
-    // (no horizontal push-apart, which was making cards drift away from their
-    // node). Adjacent commits whose cards would overlap drop down into a new
-    // row. A short leader line will connect each card's top to its dot.
-    interface CommitSlot { commit: Commit; lane: number; left: number; row: number }
+    // Commit cards are secondary callouts. They prefer to sit below their branch
+    // rail, but share the same global collision map as session cards.
+    interface CommitSlot { commit: Commit; lane: number; left: number; top: number }
     const commitSlots: CommitSlot[] = []
-    const commitsByLane = new Map<number, Commit[]>()
-    const commitRowsByLane = new Map<number, number>()
-    // Only "key" commits get a card below the lane: ones with sessions, HEAD,
-    // merges, fork points, branch heads. Ordinary middle-of-history commits stay
-    // as small dots — otherwise 30+ commit cards per lane crush readability.
     const sessionCommitIds = new Set<string>()
     for (const s of displaySessions) if (s.attachCommitId) sessionCommitIds.add(s.attachCommitId)
+    const keyCommits: { commit: Commit; lane: number; left: number; laneY: number }[] = []
     for (const c of allVisibleCommits) {
       const isKey = c.isHead || c.isMerge || sessionCommitIds.has(c.id)
         || visibleBranches.some((b) => b.forkFromCommitId === c.id || b.mergedIntoCommitId === c.id || b.headCommitId === c.id)
       if (!isKey) continue
       const lane = laneByBranch.get(c.branchId) ?? 0
-      if (!commitsByLane.has(lane)) commitsByLane.set(lane, [])
-      commitsByLane.get(lane)!.push(c)
+      const laneY = laneCenter.get(lane)
+      if (laneY === undefined) continue
+      keyCommits.push({
+        commit: c,
+        lane,
+        left: worldX(c) * zoom - COMMIT_CARD_W / 2,
+        laneY,
+      })
     }
-    for (const [lane, list] of commitsByLane) {
-      list.sort((a, b) => worldX(a) - worldX(b))
-      const rowRight: number[] = []  // right edge of last card per row
-      let maxRow = 0
-      for (const c of list) {
-        const left = worldX(c) * zoom - COMMIT_CARD_W / 2  // dot-centered, exactly
-        let row = 0
-        while (row < rowRight.length && left < rowRight[row] + 4) row++
-        rowRight[row] = left + COMMIT_CARD_W
-        if (row > maxRow) maxRow = row
-        commitSlots.push({ commit: c, lane, left, row })
+    keyCommits.sort((a, b) => (a.left - b.left) || (a.laneY - b.laneY))
+    for (const item of keyCommits) {
+      let chosenTop: number | null = null
+      for (let offset = 0; offset < SEARCH_ROWS && chosenTop === null; offset++) {
+        for (const side of ['below', 'above'] as const) {
+          const top = side === 'below'
+            ? item.laneY + CARD_RAIL_GAP + offset * (COMMIT_H + CARD_GAP_Y)
+            : item.laneY - CARD_RAIL_GAP - COMMIT_H - offset * (COMMIT_H + CARD_GAP_Y)
+          const box = { left: item.left, right: item.left + COMMIT_CARD_W, top, bottom: top + COMMIT_H }
+          if (!boxCollides(box)) {
+            chosenTop = top
+            occupy([box])
+            break
+          }
+        }
       }
-      commitRowsByLane.set(lane, list.length ? maxRow + 1 : 0)
+      if (chosenTop === null) {
+        chosenTop = item.laneY + CARD_RAIL_GAP + SEARCH_ROWS * (COMMIT_H + CARD_GAP_Y)
+        occupy([{ left: item.left, right: item.left + COMMIT_CARD_W, top: chosenTop, bottom: chosenTop + COMMIT_H }])
+      }
+      commitSlots.push({ commit: item.commit, lane: item.lane, left: item.left, top: chosenTop })
     }
 
-    // lay out lanes top→bottom. Each lane band reserves room ABOVE its line for
-    // session cards and BELOW for the commit card row.
-    const lanesSorted = [...new Set(visibleBranches.map((b) => b.lane))].sort((a, b) => a - b)
-    const laneCenter = new Map<number, number>()
-    const laneAbove = new Map<number, number>()
-    const laneBelow = new Map<number, number>()
-    let cursor = 12
-    for (const lane of lanesSorted) {
-      const rows = rowsByLane.get(lane) || 0
-      const above = rows > 0 ? LANE_LINE_PAD + rows * (CARD_H + CARD_GAP_Y) : LANE_MIN_TOP
-      const cRows = commitRowsByLane.get(lane) || 0
-      const below = cRows > 0 ? LANE_LINE_PAD + cRows * (COMMIT_H + 4) : LANE_MIN_TOP
-      const center = cursor + above
-      laneCenter.set(lane, center)
-      laneAbove.set(lane, above)
-      laneBelow.set(lane, below)
-      cursor = center + below + LANE_BASE_PAD
-    }
-    const totalHeight = cursor + 12
-
-    return { slots, rowsByLane, laneCenter, laneAbove, laneBelow, totalHeight, overflows, commitSlots }
+    return { slots, laneCenter, overflows, commitSlots }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions, displaySessions, laneByBranch, visibleBranches, commitByShort, colX, zoom,  allVisibleCommits])
 
@@ -466,7 +509,7 @@ export function GraphCanvas({
     (slot: CardSlot) => {
       const left = slot.worldXLeft + pan.x
       const lineY = laneCenterY(slot.lane) + pan.y
-      const top = lineY - LANE_LINE_PAD - (slot.row + 1) * (CARD_H + CARD_GAP_Y) + CARD_GAP_Y
+      const top = slot.top + pan.y
       return { left, top, lineY }
     },
     [laneCenterY, pan.x, pan.y],
@@ -475,8 +518,8 @@ export function GraphCanvas({
   const graphTop = AXIS_HEIGHT
   const graphHeight = Math.max(120, containerSize.h - AXIS_HEIGHT)
 
-  // commits that have a visible card (session above OR commit card below) —
-  // their dot gets a distinct color so users immediately see "this dot has cards"
+  // commits that have a visible callout card get a distinct dot color so users
+  // immediately see "this dot has cards"
   const commitsWithSessionCard = useMemo(() => {
     const set = new Set<string>()
     for (const s of layout.slots.values()) if (s.session.attachCommitId) set.add(s.session.attachCommitId)
@@ -770,9 +813,7 @@ export function GraphCanvas({
     if (slot) {
       // Normal path: session has a visible card on the canvas → pan to center it.
       const cardCenterX = slot.worldXLeft + CARD_W / 2
-      const lineY = layout.laneCenter.get(slot.lane) ?? 0
-      const cardTopVsLine = -LANE_LINE_PAD - (slot.row + 1) * (CARD_H + CARD_GAP_Y) + CARD_GAP_Y
-      const cardCenterY = lineY + cardTopVsLine + CARD_H / 2
+      const cardCenterY = slot.top + CARD_H / 2
       const newX = containerSize.w / 2 - cardCenterX
       const newY = graphHeight / 2 - cardCenterY
       const dx = Math.abs(newX - panRef.current.x)
@@ -818,9 +859,7 @@ export function GraphCanvas({
     didFocusLive.current = true
     setFocusedSessionId(id)
     const cardCenterX = slot.worldXLeft + CARD_W / 2
-    const lineY = layout.laneCenter.get(slot.lane) ?? 0
-    const cardTopVsLine = -LANE_LINE_PAD - (slot.row + 1) * (CARD_H + CARD_GAP_Y) + CARD_GAP_Y
-    const cardCenterY = lineY + cardTopVsLine + CARD_H / 2
+    const cardCenterY = slot.top + CARD_H / 2
     setPan({
       x: containerSize.w / 2 - cardCenterX,
       y: graphHeight / 2 - cardCenterY,
@@ -1021,7 +1060,7 @@ export function GraphCanvas({
             )
           })}
 
-          {/* leader lines: commit dot → session card ABOVE */}
+          {/* leader lines: commit dot → session card */}
           {cardList.map(({ session, lane, worldXLeft }) => {
             const c = session.attachCommitId ? commitByShort.get(session.attachCommitId) : undefined
             if (!c) return null
@@ -1029,29 +1068,31 @@ export function GraphCanvas({
             const sp = cardScreen(slot)
             const dotX = toScreenX(worldX(c))
             const dim = !authorMatch(c)
+            const edgeY = sp.top > sp.lineY ? sp.top : sp.top + CARD_H
             void lane; void worldXLeft
             return (
               <path
                 key={`lead-${session.id}`}
-                d={`M ${dotX},${sp.lineY} L ${dotX},${sp.top + CARD_H} L ${sp.left + 14},${sp.top + CARD_H}`}
+                d={`M ${dotX},${sp.lineY} L ${dotX},${edgeY} L ${sp.left + 14},${edgeY}`}
                 className={`canvas__chip-leader${dim ? ' canvas__chip-leader--dim' : ''}`}
                 fill="none"
               />
             )
           })}
 
-          {/* leader lines: commit dot → commit card BELOW */}
+          {/* leader lines: commit dot → commit card */}
           {layout.commitSlots.map((cs) => {
             const c = cs.commit
             const dotX = toScreenX(worldX(c))
             const dotY = laneCenterY(cs.lane) + pan.y
-            const cardTop = dotY + LANE_LINE_PAD + cs.row * (COMMIT_H + 4)
+            const cardTop = cs.top + pan.y
             const cardCenterX = cs.left + pan.x + COMMIT_CARD_W / 2
+            const edgeY = cardTop > dotY ? cardTop - 2 : cardTop + COMMIT_H + 2
             const dim = !authorMatch(c)
             return (
               <path
                 key={`clead-${c.id}`}
-                d={`M ${dotX},${dotY} L ${dotX},${cardTop - 2} L ${cardCenterX},${cardTop - 2}`}
+                d={`M ${dotX},${dotY} L ${dotX},${edgeY} L ${cardCenterX},${edgeY}`}
                 className={`canvas__chip-leader${dim ? ' canvas__chip-leader--dim' : ''}`}
                 fill="none"
               />
@@ -1132,10 +1173,9 @@ export function GraphCanvas({
               </div>
             )
           })}
-          {/* overflow "+N more" pill — small, sits above the visible card stack */}
+          {/* overflow "+N more" pill — small, sits in the stack's overflow slot */}
           {layout.overflows.map((o) => {
-            const lineY = laneCenterY(o.lane) + pan.y
-            const top = lineY - LANE_LINE_PAD - (o.row + 1) * (CARD_H + CARD_GAP_Y) + CARD_GAP_Y + (CARD_H - 22)
+            const top = o.top + pan.y
             const PILL_W = 110
             const left = o.worldXLeft + pan.x + (CARD_W - PILL_W) / 2
             if (top < -22 || top > graphHeight + 4) return null
@@ -1156,11 +1196,10 @@ export function GraphCanvas({
               </div>
             )
           })}
-          {/* commit cards — BELOW the lane line, dot-centered, stack into rows */}
+          {/* commit cards — dot-centered callouts using the same collision map */}
           {layout.commitSlots.map((cs) => {
             const c = cs.commit
-            const lineY = laneCenterY(cs.lane) + pan.y
-            const top = lineY + LANE_LINE_PAD + cs.row * (COMMIT_H + 4)
+            const top = cs.top + pan.y
             const left = cs.left + pan.x
             if (top < -COMMIT_H - 4 || top > graphHeight + 4) return null
             if (left < -COMMIT_CARD_W || left > containerSize.w) return null
